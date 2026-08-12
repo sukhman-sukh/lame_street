@@ -6,7 +6,13 @@
   <title>LameStreet</title>
   <script>
     // Resolve theme before stylesheets paint, and follow OS changes live.
+    // ?theme=light|dark pins it, for debugging or preference.
     (() => {
+      const pinned = new URLSearchParams(location.search).get('theme');
+      if (pinned === 'light' || pinned === 'dark') {
+        document.documentElement.setAttribute('data-bs-theme', pinned);
+        return;
+      }
       const mq = window.matchMedia('(prefers-color-scheme: dark)');
       const apply = () => document.documentElement.setAttribute('data-bs-theme', mq.matches ? 'dark' : 'light');
       apply();
