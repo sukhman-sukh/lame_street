@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en" data-bs-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LameStreet</title>
+  <script>
+    // Resolve theme before stylesheets paint, and follow OS changes live.
+    (() => {
+      const mq = window.matchMedia('(prefers-color-scheme: dark)');
+      const apply = () => document.documentElement.setAttribute('data-bs-theme', mq.matches ? 'dark' : 'light');
+      apply();
+      mq.addEventListener('change', apply);
+    })();
+  </script>
+  <link rel="stylesheet" href="/assets/vendor/bootstrap.min.css">
+  <link rel="stylesheet" href="/assets/vendor/bootstrap-icons.css">
+  <link rel="stylesheet" href="/assets/style.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop stop-color='%234f46e5'/%3E%3Cstop offset='1' stop-color='%237c3aed'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Cpath d='M8 21l5-6 4 3 7-9' stroke='white' stroke-width='2.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+</head>
+<body>
+  <header class="masthead">
+    <div class="wrap masthead-inner">
+      <div class="brand">
+        <span class="brand-mark"><i class="bi bi-graph-up-arrow"></i></span>
+        <div class="brand-text">
+          <h1>LameStreet</h1>
+          <p class="stamps" id="stamps"></p>
+        </div>
+      </div>
+      <div class="actions">
+        <span class="job" id="job" hidden></span>
+        <button class="btn btn-primary" id="btn-refresh" title="Fetch latest prices from Yahoo Finance">
+          <i class="bi bi-arrow-repeat"></i><span>Refresh prices</span>
+        </button>
+        <button class="btn btn-ghost" id="btn-sync" title="Read new broker email and re-derive holdings">
+          <i class="bi bi-envelope-arrow-down"></i><span>Sync holdings</span>
+        </button>
+        <button class="btn btn-ghost" id="btn-add-user" title="Add a family member, or onboard a new broker">
+          <i class="bi bi-person-plus"></i><span>Add User</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap" id="main">
+    <div class="loading" id="loading"><span class="spinner-border spinner-border-sm"></span>Loading…</div>
+  </main>
+
+  <script src="/assets/app.js"></script>
+</body>
+</html>
