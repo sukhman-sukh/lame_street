@@ -1,0 +1,34 @@
+# The image must hold code only. Secrets and personal data are mounted at
+# runtime (PM_ROOT=/data), never baked into a layer.
+.env
+.env.*
+config.json
+config.*.json
+data/
+profiles/
+dist/
+*.pdf
+*.PDF
+*.csv
+*.xlsx
+*.xls
+
+.git/
+.gitignore
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+.idea/
+.vscode/
+
+tests/
+plans/
+Dockerfile
+docker-compose.yml
+README.md

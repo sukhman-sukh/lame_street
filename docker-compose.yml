@@ -1,0 +1,15 @@
+services:
+  lamestreet:
+    build: .
+    container_name: lamestreet
+    restart: unless-stopped
+    ports:
+      # Reachable from this machine only. For the family over the LAN, change
+      # to "3002:3002" — the login (PM_AUTH_* in .env) is required either way,
+      # and on an untrusted network put HTTPS or Tailscale in front.
+      - "127.0.0.1:3002:3002"
+    volumes:
+      # Everything personal in one place: config.json, .env, data/, profiles/.
+      # This repo directory already has that layout; point it elsewhere if you
+      # keep the data separate from the code.
+      - .:/data
