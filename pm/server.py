@@ -13,6 +13,7 @@ anyone can hammer is how you get rate-limited by a mail provider.
 from __future__ import annotations
 
 import logging
+import mimetypes
 import threading
 from datetime import datetime, timedelta
 
@@ -31,6 +32,11 @@ from .store import read_json, write_json
 
 log = logging.getLogger(__name__)
 
+# Slim containers ship no /etc/mime.types, and Python's builtin table predates
+# web fonts — without these the icon fonts go out as application/octet-stream.
+mimetypes.add_type("font/woff2", ".woff2")
+mimetypes.add_type("font/woff", ".woff")
+
 MAIL_SYNC_COOLDOWN = timedelta(minutes=5)
 
 app = FastAPI(title="LameStreet", docs_url=None, redoc_url=None)
@@ -39,9 +45,10 @@ app.include_router(admin_router)
 
 # ------------------------------------------------------------------ auth gate
 
-# Reachable without a session: the login page, the login call itself, and the
-# static assets — those are public code (the repo is public), never data.
-_OPEN_PATHS = {"/login", "/api/login"}
+# Reachable without a session: the login page, the login call itself, the
+# health probe, and the static assets — those are public code (the repo is
+# public), never data.
+_OPEN_PATHS = {"/login", "/api/login", "/healthz"}
 
 
 @app.middleware("http")
@@ -153,6 +160,13 @@ def _do_sync(full: bool) -> str:
 
 
 # --------------------------------------------------------------------- routes
+
+@app.get("/healthz")
+def healthz():
+    """Liveness probe for hosting platforms — point their health check here so
+    a rolling deploy only takes traffic once the app actually answers."""
+    return {"ok": True}
+
 
 @app.get("/", response_class=HTMLResponse)
 def index():

@@ -31,6 +31,6 @@ EXPOSE 3002
 VOLUME /data
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
-  CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3002/login')"]
+  CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3002/healthz')"]
 
 CMD ["python", "-m", "pm", "serve"]
