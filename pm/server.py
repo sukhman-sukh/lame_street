@@ -16,10 +16,12 @@ import logging
 import threading
 from datetime import datetime, timedelta
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
+from . import auth
 from . import build as buildmod
 from . import config as cfgmod
 from . import ingest, paths, prices
@@ -33,6 +35,61 @@ MAIL_SYNC_COOLDOWN = timedelta(minutes=5)
 
 app = FastAPI(title="LameStreet", docs_url=None, redoc_url=None)
 app.include_router(admin_router)
+
+
+# ------------------------------------------------------------------ auth gate
+
+# Reachable without a session: the login page, the login call itself, and the
+# static assets — those are public code (the repo is public), never data.
+_OPEN_PATHS = {"/login", "/api/login"}
+
+
+@app.middleware("http")
+async def require_session(request: Request, call_next):
+    if (not auth.enabled()
+            or request.url.path in _OPEN_PATHS
+            or request.url.path.startswith("/assets/")
+            or auth.verify(request.cookies.get(auth.COOKIE))):
+        return await call_next(request)
+    if request.url.path.startswith("/api/"):
+        return JSONResponse({"detail": "login required"}, status_code=401)
+    return RedirectResponse("/login", status_code=302)
+
+
+class LoginIn(BaseModel):
+    username: str = ""
+    password: str = ""
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request):
+    if not auth.enabled() or auth.verify(request.cookies.get(auth.COOKIE)):
+        return RedirectResponse("/", status_code=302)
+    return FileResponse(paths.VIEWER / "login.html")
+
+
+@app.post("/api/login")
+def login(payload: LoginIn, request: Request):
+    client = request.client.host if request.client else "?"
+    wait = auth.throttled(client)
+    if wait:
+        raise HTTPException(status_code=429,
+                            detail=f"too many attempts — try again in {wait}s")
+    if not auth.check_login(payload.username.strip(), payload.password):
+        auth.record_failure(client)
+        raise HTTPException(status_code=401, detail="wrong username or password")
+    auth.clear_failures(client)
+    response = JSONResponse({"ok": True})
+    response.set_cookie(auth.COOKIE, auth.issue(), max_age=auth.SESSION_TTL,
+                        httponly=True, samesite="lax", path="/")
+    return response
+
+
+@app.post("/api/logout")
+def logout():
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(auth.COOKIE, path="/")
+    return response
 
 _lock = threading.Lock()
 _job: dict = {"state": "idle", "kind": None, "started_at": None,
@@ -147,10 +204,20 @@ def run(host: str = "127.0.0.1", port: int = 3002) -> None:
     if (paths.VIEWER / "assets").exists():
         app.mount("/assets", StaticFiles(directory=paths.VIEWER / "assets"), name="assets")
 
+    if host not in ("127.0.0.1", "localhost", "::1") and not auth.enabled():
+        raise SystemExit(
+            f"refusing to bind {host}: that exposes the dashboard, the admin API and "
+            "the stored mail credentials to the whole network with no login in front "
+            "of them. Set PM_AUTH_USER and PM_AUTH_PASSWORD in .env first, or serve "
+            "on 127.0.0.1.")
+
     print("\n  LameStreet")
     print(f"  → http://localhost:{port}")
-    if host not in ("127.0.0.1", "localhost"):
-        print(f"  ⚠ bound to {host} — reachable from other devices on the network, "
-              "with no login in front of it")
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        print(f"  ⚠ bound to {host} — reachable from other devices on the network; "
+              "login required (PM_AUTH_USER)")
+    if not auth.enabled():
+        print("  · no login configured (PM_AUTH_USER / PM_AUTH_PASSWORD unset) — "
+              "fine on 127.0.0.1")
     print()
     uvicorn.run(app, host=host, port=port, log_level="warning")

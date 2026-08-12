@@ -17,6 +17,7 @@ from pathlib import Path
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
+from . import auth
 from . import build as buildmod
 from . import config as cfgmod
 from . import events as ev
@@ -109,6 +110,8 @@ def _state() -> dict:
         "broker_choices": cfgmod.broker_choices(cfg),
         # Status only — the key itself never leaves the server.
         "llm": llm.status(),
+        # Whether a login gates this server, so the viewer can offer a logout.
+        "auth_enabled": auth.enabled(),
         "instruments": {
             "known": len(registry),
             "unmapped": [

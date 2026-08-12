@@ -71,6 +71,7 @@ function ago(iso) {
 async function load() {
   try {
     const res = await fetch('/api/dashboard', { cache: 'no-store' });
+    if (res.status === 401) { location.replace('/login'); return; }
     if (!res.ok) throw new Error('api unavailable');
     DATA = await res.json();
     LIVE = true;
@@ -89,6 +90,7 @@ async function load() {
   } else {
     $('.actions').style.display = 'none';
   }
+  $('#btn-logout').hidden = !SETUP?.auth_enabled;
   counted = false;
   render();
 }
@@ -104,6 +106,8 @@ async function send(url, { method = 'POST', body = null, form = null } = {}) {
     init.body = JSON.stringify(body);
   }
   const res = await fetch(url, init);
+  // Session expired mid-use: back to the login page rather than a dead error.
+  if (res.status === 401) { location.replace('/login'); throw new Error('login required'); }
   const payload = await res.json().catch(() => ({}));
   if (!res.ok) {
     const detail = payload.detail;
@@ -955,6 +959,10 @@ async function poll(job) {
 $('#btn-refresh').addEventListener('click', (e) => trigger('/api/refresh', e.currentTarget, 'Fetching prices'));
 $('#btn-sync').addEventListener('click', (e) => trigger('/api/sync', e.currentTarget, 'Reading mail'));
 $('#btn-add-user').addEventListener('click', () => go('setup', { scroll: true }));
+$('#btn-logout').addEventListener('click', async () => {
+  await fetch('/api/logout', { method: 'POST' }).catch(() => {});
+  location.replace('/login');
+});
 
 window.addEventListener('hashchange', () => {
   const id = decodeURIComponent(location.hash.slice(1)) || 'overview';
