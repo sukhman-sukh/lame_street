@@ -1,0 +1,25 @@
+{
+  "_comment": "Copy to config.json and edit. Holds no secrets — those live in .env. config.json is gitignored because it carries real names and addresses.",
+  "sources": {
+    "senders": [],
+    "subjects": []
+  },
+  "members": [
+    {
+      "id": "alice",
+      "name": "Alice",
+      "emails": ["alice@gmail.com"],
+      "brokers": ["zerodha"],
+      "active": true,
+      "mailbox": { "host": "imap.gmail.com", "port": 993, "folder": "INBOX" }
+    },
+    {
+      "id": "bob",
+      "name": "Bob",
+      "emails": ["bob@gmail.com"],
+      "brokers": ["groww", "dhan"],
+      "active": true,
+      "mailbox": { "host": "imap.gmail.com", "port": 993, "folder": "INBOX" }
+    }
+  ]
+}

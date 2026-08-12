@@ -1,0 +1,44 @@
+# ─── Secrets ───────────────────────────────────────────────────────────────
+# Mailbox addresses, Gmail app passwords, statement passwords.
+.env
+.env.*
+!.env.example
+
+# Holds real names and email addresses. Ship config.example.json instead.
+config.json
+config.*.json
+!config.example.json
+
+# ─── Personal financial data ───────────────────────────────────────────────
+# Archived broker email, statement PDFs, the event log, derived holdings,
+# price cache and the built dashboard. None of this belongs in a repository.
+data/
+profiles/
+
+# Broker statements and exports, wherever they land
+*.pdf
+*.PDF
+*.csv
+*.xlsx
+*.xls
+
+# Static export of the dashboard — contains real positions
+dist/
+
+# ─── Python ────────────────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ─── Editors and OS ────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
