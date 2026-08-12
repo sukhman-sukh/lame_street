@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+import os
 import threading
+import time
 from datetime import datetime, timedelta
 
 from fastapi import FastAPI, HTTPException, Request
@@ -212,6 +214,40 @@ def sync(full: bool = False):
     return {"started": True, "kind": "sync"}
 
 
+# -------------------------------------------------------------- self-syncing
+
+def _start_scheduler() -> None:
+    """Sync without cron: PM_SYNC_ON_START=1 reads mail as the server comes
+    up, PM_SYNC_EVERY_HOURS=24 repeats it. Meant for containers and hosted
+    machines that have no launchd/cron of their own — on a Mac, `pm schedule`
+    is still the better tool. A failed run is logged and retried at the next
+    interval; the UI buttons keep working throughout."""
+    on_start = os.environ.get("PM_SYNC_ON_START", "").strip().lower() in ("1", "true", "yes")
+    try:
+        every = float(os.environ.get("PM_SYNC_EVERY_HOURS", "").strip() or 0)
+    except ValueError:
+        log.warning("PM_SYNC_EVERY_HOURS is not a number; periodic sync disabled")
+        every = 0.0
+    if not on_start and every <= 0:
+        return
+
+    def fire():
+        try:
+            _run_job("sync", lambda: _do_sync(False))
+        except HTTPException:
+            log.info("scheduled sync skipped — another job is already running")
+
+    def beat():
+        if on_start:
+            time.sleep(3)  # let uvicorn come up so /healthz answers during the sync
+            fire()
+        while every > 0:
+            time.sleep(every * 3600)
+            fire()
+
+    threading.Thread(target=beat, daemon=True, name="pm-scheduler").start()
+
+
 def run(host: str = "127.0.0.1", port: int = 3002) -> None:
     import uvicorn
 
@@ -219,6 +255,7 @@ def run(host: str = "127.0.0.1", port: int = 3002) -> None:
     if (paths.VIEWER / "assets").exists():
         app.mount("/assets", StaticFiles(directory=paths.VIEWER / "assets"), name="assets")
 
+    _start_scheduler()
     if host not in ("127.0.0.1", "localhost", "::1") and not auth.enabled():
         raise SystemExit(
             f"refusing to bind {host}: that exposes the dashboard, the admin API and "
