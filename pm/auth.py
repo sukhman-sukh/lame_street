@@ -7,9 +7,12 @@ from anyone on the LAN. Setting PM_AUTH_USER and PM_AUTH_PASSWORD in .env turns
 on a session gate; `pm serve` refuses to bind a non-loopback host without it.
 
 Sessions are an HMAC-signed cookie: `expiry.signature`, keyed by a random
-secret persisted under data/state/. No dependency, nothing to configure, and
-restarting the server does not log anyone out. Credentials stay in .env, which
-is chmod 600 and gitignored — same treatment as the mail passwords.
+secret persisted under data/state/ mixed with a digest of the credentials.
+No dependency, nothing to configure, and restarting the server does not log
+anyone out — but changing the password revokes every outstanding session, and
+deleting data/state/auth-secret is the manual kill-switch. Credentials stay
+in .env, which is chmod 600 and gitignored — same treatment as the mail
+passwords.
 """
 from __future__ import annotations
 
@@ -50,8 +53,15 @@ def _secret() -> bytes:
     return value
 
 
+def _key() -> bytes:
+    # The credentials are part of the key, so rotating the password in .env
+    # invalidates every session ever issued — a stolen cookie dies with it.
+    user, password = credentials()
+    return _secret() + hashlib.sha256(f"{user}\x00{password}".encode()).digest()
+
+
 def _sign(payload: str) -> str:
-    return hmac.new(_secret(), payload.encode(), hashlib.sha256).hexdigest()
+    return hmac.new(_key(), payload.encode(), hashlib.sha256).hexdigest()
 
 
 def issue() -> str:
@@ -92,7 +102,14 @@ def throttled(client: str) -> int:
 
 
 def record_failure(client: str) -> None:
-    _failures.setdefault(client, []).append(time.time())
+    now = time.time()
+    # Bound the table under address-spraying: drop clients whose lockout
+    # window has fully passed before admitting a new one.
+    if len(_failures) >= 1000:
+        for stale in [c for c, times in _failures.items()
+                      if not times or now - times[-1] >= _LOCKOUT]:
+            del _failures[stale]
+    _failures.setdefault(client, []).append(now)
 
 
 def clear_failures(client: str) -> None:

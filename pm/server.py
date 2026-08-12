@@ -81,7 +81,8 @@ def login(payload: LoginIn, request: Request):
     auth.clear_failures(client)
     response = JSONResponse({"ok": True})
     response.set_cookie(auth.COOKIE, auth.issue(), max_age=auth.SESSION_TTL,
-                        httponly=True, samesite="lax", path="/")
+                        httponly=True, samesite="lax", path="/",
+                        secure=request.url.scheme == "https")
     return response
 
 
