@@ -24,7 +24,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import auth
+from . import auth, backup
 from . import build as buildmod
 from . import config as cfgmod
 from . import ingest, paths, prices
@@ -118,6 +118,13 @@ def _run_job(kind: str, fn) -> None:
             message = fn()
             if kind == "sync":
                 _last_mail_sync = now_ist()
+                if backup.enabled():
+                    # Best-effort: a failed backup must not fail the sync.
+                    try:
+                        message += f" · {backup.save()}"
+                    except Exception as exc:
+                        log.warning("backup after sync failed: %s", exc)
+                        message += " · backup failed (see server log)"
             _job.update(state="done", finished_at=iso(now_ist()), message=message)
         except Exception as exc:
             log.exception("%s job failed", kind)
@@ -250,6 +257,14 @@ def _start_scheduler() -> None:
 
 def run(host: str = "127.0.0.1", port: int = 3002) -> None:
     import uvicorn
+
+    if backup.enabled():
+        try:
+            backup.restore_if_fresh_host()
+        except Exception as exc:
+            # A fresh host that cannot restore should say so loudly and stop:
+            # silently starting empty would look like the data is gone.
+            raise SystemExit(f"backup restore failed: {exc}")
 
     paths.ensure_dirs()
     if (paths.VIEWER / "assets").exists():
