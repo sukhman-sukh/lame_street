@@ -575,7 +575,9 @@ def build_parser() -> argparse.ArgumentParser:
     from . import env as _env
     _env.load()
     default_host = os.environ.get("PM_HOST", "127.0.0.1")
-    default_port = int(os.environ.get("PM_PORT", "3002") or 3002)
+    # PORT is what hosting platforms inject and expect to be honoured; PM_PORT
+    # still wins so a local .env keeps working.
+    default_port = int(os.environ.get("PM_PORT") or os.environ.get("PORT") or 3002)
 
     sv = sub.add_parser("serve", help="run the dashboard locally")
     sv.add_argument("--host", default=default_host)

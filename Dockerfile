@@ -25,12 +25,15 @@ COPY viewer/ viewer/
 # the published port — which the app only allows with PM_AUTH_USER and
 # PM_AUTH_PASSWORD set in /data/.env. Real environment beats .env, so a
 # PM_HOST=127.0.0.1 left in the mounted file cannot break the container.
-ENV PM_ROOT=/data PM_HOST=0.0.0.0 PM_PORT=3002
+#
+# PORT rather than PM_PORT: hosting platforms inject PORT and expect the app
+# to bind exactly that. Hardcoding PM_PORT here would silently outrank it.
+ENV PM_ROOT=/data PM_HOST=0.0.0.0 PORT=3002
 
 EXPOSE 3002
 VOLUME /data
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
-  CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3002/healthz')"]
+  CMD ["python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('PORT', '3002') + '/healthz')"]
 
 CMD ["python", "-m", "pm", "serve"]
