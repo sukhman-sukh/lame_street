@@ -20,6 +20,7 @@ import io
 import logging
 import re
 import zipfile
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from email.header import decode_header, make_header
@@ -327,16 +328,19 @@ def archive(doc: MailDoc) -> None:
             path.write_bytes(att.data)
 
 
-def load_archived(senders: list[str] | None = None) -> list[tuple[dict, list[Attachment]]]:
+def load_archived(senders: list[str] | None = None) -> Iterator[tuple[dict, list[Attachment]]]:
     """Re-read everything under data/raw/ for offline re-parsing.
 
     `senders` filters to the currently-configured sources. The archive can hold
     messages fetched under older, looser filters — a mutual-fund statement from a
     registrar, say — and those shouldn't quietly come back on a re-parse.
+
+    Yields one message at a time so peak memory stays flat: a few years of
+    statements is hundreds of megabytes of PDF, and holding them all at once
+    is what puts a re-parse over the limit on a small host.
     """
-    out: list[tuple[dict, list[Attachment]]] = []
     if not paths.RAW.exists():
-        return out
+        return
 
     wanted = [s.lower() for s in (senders or [])]
     for meta_path in sorted(paths.RAW.glob("*/*/meta.json")):
@@ -360,5 +364,4 @@ def load_archived(senders: list[str] | None = None) -> list[tuple[dict, list[Att
             if not name.lower().endswith(".pdf"):
                 continue
             attachments.append(Attachment(name, "application/pdf", path.read_bytes()))
-        out.append((meta, attachments))
-    return out
+        yield meta, attachments
