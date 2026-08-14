@@ -164,6 +164,17 @@ def cmd_sync(args) -> int:
         cmd_prices(args)
     buildmod.build()
     _say(f"{GREEN}Dashboard rebuilt.{RESET}")
+
+    # Same contract as a sync run from the UI: if an off-site backup is
+    # configured, every successful sync updates it. Without this a scheduled
+    # CLI sync would quietly drift from the copy a hosted instance restores.
+    from . import backup as backupmod
+    if backupmod.enabled():
+        try:
+            _say(f"{GREEN}{backupmod.save()}{RESET}")
+        except Exception as exc:
+            _say(f"{YELLOW}Backup failed:{RESET} {exc}")
+
     return 1 if report.errors else 0
 
 
