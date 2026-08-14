@@ -260,11 +260,22 @@ def run(host: str = "127.0.0.1", port: int = 3002) -> None:
 
     if backup.enabled():
         try:
-            backup.restore_if_fresh_host()
+            restored = backup.restore_if_fresh_host()
         except Exception as exc:
             # A fresh host that cannot restore should say so loudly and stop:
             # silently starting empty would look like the data is gone.
             raise SystemExit(f"backup restore failed: {exc}")
+        if restored:
+            # The dashboard is derived, so it is not in the backup. Rebuild it
+            # from the restored events now — otherwise the page reads "no data
+            # yet" until the first sync finishes, which looks like the restore
+            # failed when it actually worked.
+            try:
+                paths.ensure_dirs()
+                buildmod.build()
+                log.info("rebuilt dashboard from restored events")
+            except Exception as exc:
+                log.warning("could not rebuild dashboard after restore: %s", exc)
 
     paths.ensure_dirs()
     if (paths.VIEWER / "assets").exists():

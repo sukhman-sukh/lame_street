@@ -41,8 +41,10 @@ log = logging.getLogger(__name__)
 BLOB_PATH = "lamestreet-backup.tar.gz.enc"
 _SALT_LEN = 16
 
-# What must survive; everything else re-derives from Gmail/NSE/Yahoo.
-_INCLUDE = ("config.json", "data/events", "data/snapshots", "data/state")
+# What must survive; everything else re-derives from Gmail/NSE/Yahoo. Prices
+# are re-fetchable but weigh a few KB, and carrying them means a restored host
+# can render a complete dashboard before its first price refresh.
+_INCLUDE = ("config.json", "data/events", "data/snapshots", "data/state", "data/prices")
 
 
 def settings() -> tuple[str, str, str]:
