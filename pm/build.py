@@ -180,7 +180,8 @@ def build() -> dict:
     for warning in state["warnings"]:
         anchor = anchors.get(warning.get("member"))
         stamp = warning.get("ts")
-        if anchor and stamp and stamp < anchor and warning["kind"] in ("drift", "oversell"):
+        if anchor and stamp and stamp < anchor and warning["kind"] in (
+                "drift", "oversell", "partial_snapshot"):
             historical += 1
             continue
         attention.append({

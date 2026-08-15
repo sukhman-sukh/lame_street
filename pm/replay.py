@@ -36,6 +36,13 @@ def _new_position(isin, symbol, name) -> dict:
         "cost_known": True,   # False once a snapshot hands us shares we never saw bought
         "first_seen": None,
         "last_event": None,
+        # What the position cost per share the last time a snapshot retired it.
+        # A statement that omits a holding and a later one that lists it again is
+        # overwhelmingly a gap in the paperwork rather than a sale followed by a
+        # repurchase, so remembering the average is what stops a round trip
+        # through an incomplete statement erasing the cost basis for good.
+        "retired_avg": None,
+        "retired_cost_known": True,
     }
 
 
@@ -128,6 +135,11 @@ def replay(events: list[dict] | None = None) -> dict:
                         pass
                     elif old_avg > 0:
                         pos["cost"] = new_qty * old_avg
+                    elif pos["retired_avg"]:
+                        # Back from the dead: an earlier statement dropped it and
+                        # this one has it again. Price it at what it cost before.
+                        pos["cost"] = new_qty * pos["retired_avg"]
+                        pos["cost_known"] = pos["retired_cost_known"]
                     else:
                         pos["cost"] = 0.0
                         pos["cost_known"] = False
@@ -136,12 +148,44 @@ def replay(events: list[dict] | None = None) -> dict:
                     drift.append(f"{pos['symbol']} {old_qty:g}→{new_qty:g}")
                 pos["last_event"] = ev["ts"]
 
-            # Anything the statement omits is no longer in the demat account.
-            for key, pos in book.items():
-                if key not in seen and pos["qty"] > EPS:
-                    drift.append(f"{pos['symbol']} {pos['qty']:g}→0")
-                    pos["qty"], pos["cost"] = 0.0, 0.0
-                    pos["last_event"] = ev["ts"]
+            # Anything the statement omits is no longer in the demat account —
+            # but only if the statement was read whole. A parser that loses a page
+            # produces a document that looks exactly like a liquidation, and acting
+            # on it destroys the quantity and the cost basis of every position it
+            # failed to read. Nobody sells most of a portfolio and keeps the rest in
+            # one month, so past a threshold the likelier explanation is the
+            # paperwork, and the safe move is to correct what the statement lists
+            # and leave the rest alone.
+            #
+            # One class of omission is not a sale at all: Indian equity settles
+            # T+1, so shares bought on the statement's own date are not in the
+            # demat account when it is drawn up. The statement is stamped at
+            # 23:59 precisely so it supersedes that day's trades, and for
+            # everything already settled that is right — but for a purchase made
+            # that same day it would retire a position the document could not
+            # have seen.
+            omitted = [(key, pos) for key, pos in book.items()
+                       if key not in seen and pos["qty"] > EPS
+                       and (pos["last_event"] or "")[:10] != ev["ts"][:10]]
+            held = sum(1 for pos in book.values() if pos["qty"] > EPS)
+            if omitted and len(omitted) > max(3, held * 0.5):
+                warnings.append({
+                    "member": member, "kind": "partial_snapshot", "ts": ev["ts"],
+                    "symbol": None,
+                    "detail": f"statement lists {len(ev.get('holdings', []))} positions but "
+                              f"omits {len(omitted)} of {held} held — too much to be a sale, "
+                              "so it was read as incomplete and the omitted positions were "
+                              "left untouched",
+                    "source": ev.get("source"),
+                })
+                omitted = []
+
+            for key, pos in omitted:
+                drift.append(f"{pos['symbol']} {pos['qty']:g}→0")
+                pos["retired_avg"] = _avg(pos) or pos["retired_avg"]
+                pos["retired_cost_known"] = pos["cost_known"]
+                pos["qty"], pos["cost"] = 0.0, 0.0
+                pos["last_event"] = ev["ts"]
 
             if drift:
                 warnings.append({
