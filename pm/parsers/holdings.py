@@ -30,6 +30,7 @@ from .common import (
     numbers_in,
     pick_table,
     symbol_from_name,
+    table_pages,
     to_number,
     valid_isin,
 )
@@ -81,17 +82,37 @@ TRANSACTION_COLUMNS = (
 # Order is the whole point. A statement lists several quantity-shaped columns and
 # only one is the position:
 #
-#   Dhan:    Sr | ISIN | Company | Free Bal | Pldg Bal | … | Tot Qty | Rate | Value
-#   Groww:   ISIN | Company | Current Bal | Free Bal | Pldg Bal | … | Rate | Value
+#   Dhan (CDSL):  Sr | ISIN | Company | Free Bal | Pldg Bal | Earmark | Demat |
+#                 Remat | Lock In | Tot Qty | Rate | Value
+#   Zerodha:      ISIN | Company | Curr. Bal | Free Bal | Pldg. Bal | Earmark Bal |
+#                 Demat | Remat | Lockin | Rate | Value
+#   Groww:        ISIN | Company | Current Bal | Free Bal | Pldg Bal | … | Rate | Value
 #
 # "Free Bal" excludes pledged shares, so matching a bare "bal" first would
-# silently under-report anyone using margin. The total always wins.
-QTY_COLUMNS = (
+# silently under-report anyone using margin — and drop a fully-pledged holding
+# altogether, since its free balance reads 0. The total always wins.
+QTY_TOTAL_COLUMNS = (
     ("tot qty", "total qty", "total quantity"),
-    ("current bal", "closing bal", "total bal"),
+    ("curr. bal", "curr bal", "current bal", "closing bal", "total bal"),
     ("holding", "quantity", "qty", "units"),
-    ("bal",),
 )
+
+# Not every layout states a total. The CDSL statement Dhan sends through Raise
+# Securities is ruled without one:
+#
+#   Sr. | ISIN Code | Company Name | Free Bal | Pldg Bal | Demat | Remat | Lockin | Rate | Value
+#
+# There the position is the sum of the parts, which is exactly what the layouts
+# that *do* carry a "Tot Qty" put in it. Summing is the only reading that keeps
+# pledged shares, so it takes precedence over the bare "bal" fallback below.
+QTY_COMPONENT_COLUMNS = (
+    "free bal", "pldg", "pledg", "earmark", "lock in", "lockin",
+    "demat", "remat", "safekeep",
+)
+
+# Kept as one flat tuple for the callers that only need to recognise a
+# quantity-ish column name rather than decide which one to read.
+QTY_COLUMNS = QTY_TOTAL_COLUMNS + (QTY_COMPONENT_COLUMNS, ("bal",))
 
 # Most specific first — find_date takes the first keyword that matches, and
 # "Holdings as on 31-08-2026" is a better answer than the period line above it.
@@ -172,7 +193,43 @@ def _holdings_offset(text: str) -> int | None:
     return min(hits) if hits else None
 
 
-def _column_plan(tables) -> tuple[int, int, str] | None:
+def _quantity_plan(header: list[str]) -> tuple[list[int], str] | None:
+    """Which column(s) of this header state the position.
+
+    Returns (column indices, a label for the notes). More than one index means the
+    layout carries no total and the position is the sum of its parts — free plus
+    pledged plus earmarked and so on.
+    """
+    for group in QTY_TOTAL_COLUMNS:
+        at = header_index(header, *group)
+        if at is not None:
+            return [at], header[at]
+
+    parts = [
+        idx for idx, cell in enumerate(header)
+        if any(kw in (cell or "").lower() for kw in QTY_COMPONENT_COLUMNS)
+    ]
+    if len(parts) >= 2:
+        return parts, " + ".join(header[idx] for idx in parts)
+
+    at = header_index(header, "bal")
+    return ([at], header[at]) if at is not None else None
+
+
+def _quantity_from(row: list[str], columns: list[int]) -> float | None:
+    """Read the position out of a row, summing the parts when there are several."""
+    total, seen = 0.0, False
+    for idx in columns:
+        if idx >= len(row):
+            continue
+        value = to_number(row[idx])
+        if value is not None:
+            total += value
+            seen = True
+    return total if seen else None
+
+
+def _column_plan(tables) -> tuple[int, list[int], str] | None:
     """Learn the column layout from a header row, even one with no data under it.
 
     Statements routinely rule the header and leave the body as plain text, so the
@@ -181,23 +238,21 @@ def _column_plan(tables) -> tuple[int, int, str] | None:
     balance — and that is enough to read the text rows positionally instead of
     guessing which number is the quantity.
 
-    Returns (numeric column count, index of the quantity among them, its name).
+    Returns (numeric column count, offsets of the quantity among them, its name).
     """
     for table in tables or []:
         header = [(c or "").lower() for c in table[0]]
         if header_index(header, "isin") is None:
             continue
-        qty_at = next(
-            (idx for group in QTY_COLUMNS if (idx := header_index(header, *group)) is not None),
-            None,
-        )
-        if qty_at is None:
+        plan = _quantity_plan(header)
+        if plan is None:
             continue
+        qty_at, label = plan
         name_at = header_index(header, "company", "security", "scrip", "name", "description")
         first_numeric = (name_at + 1) if name_at is not None else 1
         numeric = len(header) - first_numeric
-        if numeric >= 1 and qty_at >= first_numeric:
-            return numeric, qty_at - first_numeric, header[qty_at]
+        if numeric >= 1 and all(at >= first_numeric for at in qty_at):
+            return numeric, [at - first_numeric for at in qty_at], label
     return None
 
 
@@ -227,34 +282,55 @@ def _from_tables(tables, result: ParseResult) -> bool:
     if len(candidates) < len(tables or []):
         result.note(f"ignored {len(tables) - len(candidates)} transaction-level table(s)")
 
-    table = pick_table(candidates, ("isin",), ("qty", "quantity", "bal", "holding", "units"))
-    if not table:
+    chosen = pick_table(candidates, ("isin",), ("qty", "quantity", "bal", "holding", "units"))
+    if not chosen:
         result.note("no table with ISIN + a balance column")
         return False
 
-    header = [(c or "").lower() for c in table[0]]
+    # Every page of it, not just the first — a holdings table that runs over a
+    # page break is extracted as one table per page. A position row is one with an
+    # ISIN on it, which is what lets a continuation page with no header be
+    # recognised as part of the same table.
+    body = table_pages(candidates, chosen,
+                       is_row=lambda r: find_isin(" ".join(c or "" for c in r)) is not None)
+    if len(body) > len(chosen) - 1:
+        result.note(f"holdings table continues past its first page — "
+                    f"read {len(body)} rows in total")
+
+    header = [(c or "").lower() for c in chosen[0]]
     col_isin = header_index(header, "isin")
-    col_qty = next(
-        (idx for group in QTY_COLUMNS if (idx := header_index(header, *group)) is not None),
-        None,
-    )
+    plan = _quantity_plan(header)
     col_name = header_index(header, "company", "security", "scrip", "name", "description")
     col_avg = header_index(header, "average", "avg", "buy price", "cost")
+    col_rate = header_index(header, "rate")
+    col_value = header_index(header, "value", "market val", "mkt val")
 
-    if col_isin is None or col_qty is None:
-        result.note(f"table found but missing columns (isin={col_isin}, qty={col_qty})")
+    if col_isin is None or plan is None:
+        result.note(f"table found but missing columns (isin={col_isin}, qty={plan})")
         return False
-    result.note(f"reading quantity from column {col_qty!r}: {header[col_qty]!r}")
+    col_qty, qty_label = plan
+    result.note(f"reading quantity from column {col_qty[0]!r}: {qty_label!r}"
+                if len(col_qty) == 1 else
+                f"no total column, so summing columns {col_qty}: {qty_label!r}")
 
     result.method = "table"
-    for row in table[1:]:
+    for row in body:
         joined = " ".join(c or "" for c in row)
         if SKIP_ROW.search(joined):
             continue
         isin = find_isin(row[col_isin] if col_isin < len(row) else "") or find_isin(joined)
         if not isin:
             continue
-        qty = to_number(row[col_qty]) if col_qty < len(row) else None
+        qty = _quantity_from(row, col_qty)
+        # The row states its own rate and market value, so value/rate is an
+        # independent reading of the quantity. Checking it here is what stops a
+        # misread column silently retiring a position.
+        rate = to_number(row[col_rate]) if col_rate is not None and col_rate < len(row) else None
+        value = to_number(row[col_value]) if col_value is not None and col_value < len(row) else None
+        if rate and value and rate > 0 and value > 0:
+            qty, complaint = _reconcile_quantity(qty, [0.0, rate, value])
+            if complaint:
+                result.note(f"{isin}: {complaint}")
         if qty is None or qty <= 0:
             continue
         avg = to_number(row[col_avg]) if col_avg is not None and col_avg < len(row) else None
@@ -300,11 +376,13 @@ def _reconcile_quantity(qty: float | None, numbers: list[float]) -> tuple[float 
                      "used the arithmetic" if qty is not None else "")
 
 
-def _from_text(text: str, result: ParseResult, plan: tuple[int, int, str] | None = None) -> None:
+def _from_text(text: str, result: ParseResult, plan: tuple[int, list[int], str] | None = None) -> None:
     hits = 0
     if plan:
-        count, index, label = plan
-        result.note(f"reading {label!r} as column {index + 1} of the {count} "
+        count, offsets, label = plan
+        where = (f"column {offsets[0] + 1}" if len(offsets) == 1
+                 else "columns " + ", ".join(str(o + 1) for o in offsets) + " summed")
+        result.note(f"reading {label!r} as {where} of the {count} "
                     "numeric columns on each row")
 
     for line in text.splitlines():
@@ -320,14 +398,15 @@ def _from_text(text: str, result: ParseResult, plan: tuple[int, int, str] | None
 
         qty = None
         if plan:
-            count, index, _ = plan
+            count, offsets, _ = plan
             if len(numbers) >= count:
                 # Count in from the END of the row. Security names contain digits
                 # more often than you would expect — "MANAPPURAM FIN RE2/-",
                 # "RAIN INDUSTRIES-2/-" — and counting from the front lets one of
                 # those shift every column, which silently turns a market value
                 # into a share count.
-                qty = numbers[-count:][index]
+                columns = numbers[-count:]
+                qty = sum(columns[offset] for offset in offsets)
         if qty is None:
             positive = [v for v in numbers if v > 0]
             qty = positive[0] if positive else None

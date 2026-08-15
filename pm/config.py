@@ -79,7 +79,12 @@ BROKER_PROFILES: dict[str, dict] = {
             "no-reply-transaction-with-holding-statement@reportsmailer.zerodha.net",
         ],
         "subjects": ["combined equity contract note", "transaction with holding statement"],
-        "layouts": {"contract_note": "sebi-split-table",
+        # Two formats, and both are still in the archive. Notes up to mid-2025 are
+        # ruled one row per fill with a Buy(B)/Sell(S) column; later ones use
+        # SEBI's per-ISIN net obligation blocks. Declaring the newer one first
+        # keeps it preferred — it states the obligation directly, so it cannot be
+        # thrown off by a fill table breaking across pages.
+        "layouts": {"contract_note": ["sebi-split-table", "buy-sell-column"],
                     "holdings": "holdings-balance-table"},
         "verified": True,
     },

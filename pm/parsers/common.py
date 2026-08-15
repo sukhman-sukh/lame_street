@@ -189,6 +189,72 @@ def pick_table(tables: list[list[list[str]]], *required: tuple[str, ...]) -> lis
     return best
 
 
+# Footnote markers ride along on a header cell, and a statement prints them on
+# the first page only: "Gross Rate/ Trade Price per Unit(₹)²" on page one becomes
+# "…per Unit(₹)" on page two. Left in, that one character makes the continuation
+# look like a different table and its rows are dropped.
+FOOTNOTE_MARK = re.compile(r"[¹²³⁴⁵⁶⁷⁸⁹⁰*†‡]+|(?<=[)\]a-z])\d+$")
+
+
+def _header_signature(header_row: list[str]) -> tuple[str, ...]:
+    """A header reduced to what identifies the table, not how it was typeset.
+
+    Whitespace goes entirely: the same header re-ruled on the next page comes back
+    with "(before levies)(₹)" where the first page had "(before levies) (₹)", and
+    that single space is otherwise enough to make the continuation look like a
+    different table and lose every row on it.
+    """
+    cells = []
+    for cell in header_row:
+        text = FOOTNOTE_MARK.sub("", (cell or "").strip().lower())
+        cells.append(re.sub(r"\s+", "", text))
+    return tuple(cells)
+
+
+def table_pages(
+    tables: list[list[list[str]]],
+    chosen: list[list[str]],
+    is_row=None,
+) -> list[list[str]]:
+    """Every data row of `chosen`, gathered from all the pages it spans.
+
+    A table that runs past the bottom of a page comes back from extraction as
+    several tables, in one of two shapes: repeating its header, or — when the PDF
+    rules the header only once — as a bare block of data rows. Keeping only the
+    first page silently drops the rest, which on a contract note loses trades and
+    on a holdings statement retires positions that were never sold.
+
+    Header-repeating pages are matched on the header, which is what makes that
+    half safe: an unrelated table carrying the same columns has a different header
+    and is left alone. A headerless continuation has nothing to match on, so it is
+    admitted only when `is_row` recognises every one of its rows as a real row of
+    this table. With no `is_row` they are ignored — guessing would be worse than
+    missing them.
+    """
+    if not chosen:
+        return []
+    signature = _header_signature(chosen[0])
+    width = len(chosen[0])
+
+    rows: list[list[str]] = []
+    started = False
+    for table in tables:
+        if not table:
+            continue
+        page = next((table[idx:] for idx, header_row in enumerate(table[:3])
+                     if _header_signature(header_row) == signature), None)
+        if page is not None:
+            started = True
+            rows.extend(page[1:])
+            continue
+        if not (started and is_row):
+            continue
+        body = [r for r in table if any((c or "").strip() for c in r)]
+        if body and len(table[0]) == width and all(is_row(r) for r in body):
+            rows.extend(body)
+    return rows or list(chosen[1:])
+
+
 def clean_name(text: str) -> str:
     """Tidy a security description into something displayable."""
     name = re.sub(r"\s+", " ", (text or "")).strip(" -|")

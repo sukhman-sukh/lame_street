@@ -25,6 +25,7 @@ from .common import (
     numbers_in,
     pick_table,
     symbol_from_name,
+    table_pages,
     to_number,
 )
 
@@ -169,8 +170,27 @@ def _from_tables(tables, result: ParseResult) -> None:
         result.note(f"table found but missing columns (qty={col_qty}, price={col_price})")
         return
 
+    def _is_trade_row(row: list[str]) -> bool:
+        """A row of this same table, on a page that repeated no header.
+
+        Deliberately strict: it must carry a buy/sell marker, a positive quantity
+        and a price. A block of data that satisfies all three is a page of trades
+        and nothing else in these documents looks like it.
+        """
+        if col_side is None or col_side >= len(row) or col_qty >= len(row) or col_price >= len(row):
+            return False
+        if _side_from(row[col_side] or "", 1) is None:
+            return False
+        qty, price = to_number(row[col_qty]), to_number(row[col_price])
+        return bool(qty and price and qty > 0 and price > 0)
+
+    body = table_pages(tables, table, is_row=_is_trade_row)
+    if len(body) > len(table) - 1:
+        result.note(f"trade table continues past its first page — "
+                    f"read {len(body)} rows in total")
+
     result.method = "table"
-    for row in table[1:]:
+    for row in body:
         joined = " ".join(c or "" for c in row)
         if not joined.strip() or SKIP_ROW.search(joined):
             continue
