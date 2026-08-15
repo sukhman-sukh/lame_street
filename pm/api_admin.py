@@ -11,8 +11,6 @@ from __future__ import annotations
 
 import logging
 import re
-import tempfile
-from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
@@ -491,17 +489,6 @@ async def upload_holdings(member_id: str, file: UploadFile = File(...), as_of: s
     if not blob.strip():
         raise HTTPException(422, "the file is empty")
 
-    with tempfile.NamedTemporaryFile("wb", suffix=".csv", delete=False) as tmp:
-        tmp.write(blob)
-        temp_path = Path(tmp.name)
-    try:
-        rows, notes = manual.read_holdings_csv(temp_path)
-    finally:
-        temp_path.unlink(missing_ok=True)
-
-    if not rows:
-        raise HTTPException(422, "; ".join(notes) or "no holdings found in that file")
-
     when = None
     if as_of:
         from datetime import datetime
@@ -510,35 +497,17 @@ async def upload_holdings(member_id: str, file: UploadFile = File(...), as_of: s
         except ValueError:
             raise HTTPException(422, "date should look like 2026-08-10")
 
-    # Land each row on the position it belongs to before recording anything.
-    from .replay import replay
+    result = manual.record_holdings_csv(
+        member_id, blob, filename=file.filename or "upload.csv", when=when)
+    if not result.get("ok"):
+        raise HTTPException(422, result.get("detail") or "could not read that export")
 
-    held = replay()["holdings"].get(member_id, [])
-    rows, match_notes = manual.match_to_holdings(rows, held)
-    notes += match_notes
-
-    snapshot = manual.set_holdings(
-        member=member_id, rows=rows, when=when,
-        source=ev.SRC_CSV, doc=file.filename or "upload.csv",
-    )
-    written, _ = ev.append([snapshot])
-
-    registry = instruments.load_registry()
-    for row in rows:
-        instruments.resolve(registry, isin=row.get("isin"), symbol=row["symbol"],
-                            name=row.get("name", ""))
-    instruments.save_registry(registry)
     payload = buildmod.build()
-
     after = next((m for m in payload["members"] if m["id"] == member_id), {})
     return {
-        "positions": len(rows),
-        "with_cost": sum(1 for r in rows if r.get("avg")),
-        "unmatched": sum(1 for r in rows if not r.get("isin")),
-        "new": bool(written),
+        **result,
         "invested": after.get("invested"),
         "cost_unknown": sum(1 for h in after.get("holdings", []) if not h.get("cost_known")),
-        "notes": notes,
         "setup": _state(),
     }
 

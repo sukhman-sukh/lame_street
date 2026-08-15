@@ -39,9 +39,34 @@
         <button class="btn btn-primary" id="btn-refresh" title="Fetch latest prices from Yahoo Finance">
           <i class="bi bi-arrow-repeat"></i><span>Refresh prices</span>
         </button>
-        <button class="btn btn-ghost" id="btn-sync" title="Read new broker email and re-derive holdings">
-          <i class="bi bi-envelope-arrow-down"></i><span>Sync holdings</span>
-        </button>
+        <div class="sync-wrap">
+          <button class="btn btn-ghost" id="btn-sync" aria-expanded="false"
+                  title="Sync holdings — optionally from a broker export">
+            <i class="bi bi-envelope-arrow-down"></i><span>Sync holdings</span>
+            <i class="bi bi-chevron-down caret-down"></i>
+          </button>
+          <div class="sync-pop card" id="sync-pop" hidden>
+            <div class="card-body">
+              <p class="help">
+                Reads new broker email and re-derives holdings. Everyone with an uploaded
+                export is carried forward from it, plus the trades since.
+              </p>
+              <form id="form-sync">
+                <p class="help muted">Optional — attach a broker export to re-anchor
+                  someone first. It becomes their latest position, and the sync then adds
+                  only what traded after it.</p>
+                <select class="form-select" name="member">
+                  <option value="">Attach an export for…</option>
+                </select>
+                <input class="form-control" name="file" type="file" accept=".csv,text/csv">
+                <button class="btn btn-primary" type="submit">
+                  <i class="bi bi-arrow-repeat"></i>Sync now
+                </button>
+              </form>
+              <p class="msg" id="msg-sync"></p>
+            </div>
+          </div>
+        </div>
         <button class="btn btn-ghost" id="btn-add-user" title="Add a family member, or onboard a new broker">
           <i class="bi bi-person-plus"></i><span>Add User</span>
         </button>

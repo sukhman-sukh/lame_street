@@ -129,6 +129,77 @@ def match_to_holdings(rows: list[dict], known: list[dict]) -> tuple[list[dict], 
     return rows, notes
 
 
+def record_holdings_csv(
+    member_id: str, data: bytes, *, filename: str = "upload.csv", when: date | None = None,
+) -> dict:
+    """Read a broker export, land it on the right positions, and record it.
+
+    One code path for every way an export arrives — the Setup panel, the sync
+    button, the CLI — because the matching is the part that must not differ
+    between them. Returns a summary; the caller rebuilds the dashboard.
+
+    The file itself is archived alongside the statements. An export now outranks
+    the mail, which makes it the most consequential document in the log, and it
+    was the only one not being kept.
+    """
+    import tempfile
+
+    from . import events as ev
+    from . import instruments
+    from .mailbox import Attachment, MailDoc, archive
+    from .events import IST, now_ist
+    from .replay import replay
+
+    if not data.strip():
+        return {"ok": False, "detail": "the file is empty"}
+
+    with tempfile.NamedTemporaryFile("wb", suffix=".csv", delete=False) as tmp:
+        tmp.write(data)
+        temp_path = Path(tmp.name)
+    try:
+        rows, notes = read_holdings_csv(temp_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+    if not rows:
+        return {"ok": False, "detail": "; ".join(notes) or "no holdings found in that file",
+                "notes": notes}
+
+    held = replay()["holdings"].get(member_id, [])
+    rows, match_notes = match_to_holdings(rows, held)
+    notes += match_notes
+
+    snapshot = set_holdings(member=member_id, rows=rows, when=when,
+                            source=ev.SRC_CSV, doc=filename)
+    written, dupes = ev.append([snapshot])
+
+    stamp = datetime.fromisoformat(snapshot["ts"])
+    archive(MailDoc(
+        uid="", message_id=f"<csv-{snapshot['id']}@lamestreet.local>",
+        subject=f"Uploaded export: {filename}", sender="upload", recipients=[], body="",
+        date=stamp.astimezone(IST) if stamp.tzinfo else stamp.replace(tzinfo=IST),
+        attachments=[Attachment(filename, "text/csv", data)], uploaded=True,
+    ))
+
+    registry = instruments.load_registry()
+    for row in rows:
+        instruments.resolve(registry, isin=row.get("isin"), symbol=row["symbol"],
+                            name=row.get("name", ""))
+    instruments.save_registry(registry)
+
+    return {
+        "ok": True,
+        "member": member_id,
+        "as_of": snapshot["ts"][:10],
+        "positions": len(rows),
+        "with_cost": sum(1 for r in rows if r.get("avg")),
+        "unmatched": sum(1 for r in rows if not r.get("isin")),
+        "new": bool(written),
+        "duplicate": bool(dupes and not written),
+        "notes": notes,
+    }
+
+
 def _column(header: list[str], keys: tuple[str, ...]) -> int | None:
     lowered = [(h or "").strip().lower() for h in header]
     for key in keys:

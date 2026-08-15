@@ -27,7 +27,7 @@ from pydantic import BaseModel
 from . import auth, backup
 from . import build as buildmod
 from . import config as cfgmod
-from . import ingest, paths, prices
+from . import ingest, manual, paths, prices
 from .api_admin import router as admin_router
 from .events import iso, now_ist
 from .store import read_json, write_json
@@ -44,6 +44,9 @@ MAIL_SYNC_COOLDOWN = timedelta(minutes=5)
 # Generous on purpose: a year's consolidated account statement is a big PDF, and
 # the mail path already accepts attachments this size.
 MAX_STATEMENT = 25 * 1024 * 1024
+
+# An export is a text file; anything much larger is not one.
+MAX_UPLOAD = 5 * 1024 * 1024
 
 app = FastAPI(title="LameStreet", docs_url=None, redoc_url=None)
 app.include_router(admin_router)
@@ -252,6 +255,56 @@ async def upload_statement(
             result["notes"] = list(result.get("notes", [])) + [
                 "another job is already running — press Sync when it finishes"]
     return {**result, "sync_started": started}
+
+
+@app.post("/api/sync-holdings")
+async def sync_holdings(
+    file: UploadFile | None = File(None),
+    member: str = Form(""),
+):
+    """Sync holdings, optionally re-anchoring on a broker export first.
+
+    With an export attached it becomes that person's latest anchor, and the mail
+    sync that follows contributes only the trades after it. With nothing attached
+    it is an ordinary sync, which — because an export outranks the statements that
+    follow it — is already "the diffs since the last export".
+    """
+    cfg = cfgmod.load()
+    result: dict = {}
+
+    blob = await file.read() if file is not None else b""
+    if blob:
+        member_id = member.strip()
+        if not member_id:
+            raise HTTPException(422, "choose whose export this is")
+        if not cfg.member(member_id):
+            raise HTTPException(404, "no such member")
+        if len(blob) > MAX_UPLOAD:
+            raise HTTPException(413, "that file is larger than 5 MB — it isn't a holdings export")
+        result = manual.record_holdings_csv(
+            member_id, blob, filename=(file.filename or "upload.csv"))
+        if not result.get("ok"):
+            raise HTTPException(422, result.get("detail") or "could not read that export")
+        buildmod.build()
+
+    if not cfg.mailboxes():
+        if not result:
+            raise HTTPException(400, "No inbox connected yet — add a Gmail address and app "
+                                     "password for at least one person in the Setup tab.")
+        return {**result, "sync_started": False,
+                "notes": list(result.get("notes", [])) + ["no inbox connected, so nothing "
+                                                          "was read after the export"]}
+
+    # An attached export makes this a deliberate action, so it skips the cooldown
+    # that exists to stop the refresh button being hammered.
+    if not blob and _last_mail_sync and now_ist() - _last_mail_sync < MAIL_SYNC_COOLDOWN:
+        wait = MAIL_SYNC_COOLDOWN - (now_ist() - _last_mail_sync)
+        raise HTTPException(
+            status_code=429,
+            detail=f"mail was synced {int(wait.total_seconds() // 60) + 1} minute(s) ago — "
+                   "holdings change slowly, prices are the thing worth refreshing")
+    _run_job("sync", lambda: _do_sync(False))
+    return {**result, "sync_started": True}
 
 
 @app.post("/api/sync")

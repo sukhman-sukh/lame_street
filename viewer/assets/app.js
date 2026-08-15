@@ -1051,7 +1051,66 @@ async function poll(job) {
 }
 
 $('#btn-refresh').addEventListener('click', (e) => trigger('/api/refresh', e.currentTarget, 'Fetching prices'));
-$('#btn-sync').addEventListener('click', (e) => trigger('/api/sync', e.currentTarget, 'Reading mail'));
+
+/* Sync, with the option of re-anchoring on a broker export first. */
+const syncPop = $('#sync-pop');
+const syncBtn = $('#btn-sync');
+
+function closeSyncPop() {
+  syncPop.hidden = true;
+  syncBtn.setAttribute('aria-expanded', 'false');
+}
+
+syncBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const open = syncPop.hidden;
+  syncPop.hidden = !open;
+  syncBtn.setAttribute('aria-expanded', String(open));
+  if (!open) return;
+  // Populate from whoever exists right now, keeping any choice already made.
+  const select = syncPop.querySelector('select[name=member]');
+  const chosen = select.value;
+  select.innerHTML = '<option value="">Attach an export for…</option>'
+    + (DATA?.members || []).map((m) =>
+      `<option value="${esc(m.id)}">${esc(m.name)}</option>`).join('');
+  select.value = chosen;
+});
+
+document.addEventListener('click', (e) => {
+  if (!syncPop.hidden && !syncPop.contains(e.target)) closeSyncPop();
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSyncPop(); });
+
+$('#form-sync').addEventListener('submit', action('msg-sync', async () => {
+  const form = $('#form-sync');
+  const file = form.querySelector('input[type=file]').files[0];
+  const member = form.querySelector('select[name=member]').value;
+  if (file && !member) throw new Error('Choose whose export this is.');
+
+  const body = new FormData();
+  if (file) { body.append('file', file); body.append('member', member); }
+  const res = await send('/api/sync-holdings', { form: body });
+
+  form.reset();
+  let msg;
+  if (res.ok) {
+    const who = (DATA.members || []).find((m) => m.id === res.member);
+    msg = `${esc(who ? who.name : res.member)} re-anchored to ${res.positions} positions`
+      + ` as of ${esc(res.as_of)}.`;
+    if (res.unmatched) msg += ` ${res.unmatched} row(s) had no ISIN.`;
+  } else {
+    msg = 'Syncing.';
+  }
+  if (res.sync_started) {
+    const job = $('#job');
+    job.hidden = false; job.className = 'job'; job.textContent = 'Reading mail…';
+    poll(job).then(closeSyncPop);
+    msg += ' Reading the mail since then — the numbers update when it finishes.';
+  }
+  const notes = (res.notes || []).length
+    ? `<br><span class="muted">${esc(res.notes.join('; '))}</span>` : '';
+  return msg + notes;
+}, { rerender: false }));
 $('#btn-add-user').addEventListener('click', () => go('setup', { scroll: true }));
 $('#btn-logout').addEventListener('click', async () => {
   await fetch('/api/logout', { method: 'POST' }).catch(() => {});

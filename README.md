@@ -110,6 +110,15 @@ master list. Without the matching, an upload would key on the name and create a
 *second* position for every company already held; anything still unmatched is
 reported rather than guessed at.
 
+There are two ways in, and both run the same import. **Sync holdings** in the
+header opens a panel where an export can be attached: with one attached that
+person is re-anchored to it and the sync that follows adds only what traded
+after; with nothing attached it is an ordinary sync. The Setup tab's **Sync
+holdings from CSV** panel does the import alone, without reading mail.
+
+The uploaded file is archived under `data/raw/` beside the statements, so the
+document that anchors a portfolio is as recoverable as everything else.
+
 **An export takes precedence over the mail.** Once you upload one for someone,
 their holdings are that export plus the trades after it — depository statements
 arriving later no longer override it. They are still read and compared, and any
