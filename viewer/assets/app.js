@@ -186,14 +186,30 @@ function renderStamps() {
 }
 
 function renderStats() {
-  const t = DATA.totals || {};
+  // Scoped to whoever is selected. The same four numbers answer the same question
+  // for one person as for the family, so it is the same row of cards either way —
+  // only the source changes.
+  const member = (DATA.members || []).find((m) => m.id === active);
+  const t = member || DATA.totals || {};
+  const scope = member
+    ? `${member.positions} position${member.positions === 1 ? '' : 's'} · `
+      + `holdings ${ago(member.holdings_as_of)}`
+    : `${t.positions || 0} positions · ${t.members || 0} people`;
+  // P&L is measured against the cost of what could be priced, never against total
+  // invested — so say when the two differ, otherwise the card looks wrong next to
+  // the one beside it.
+  const unpriced = t.unpriced || 0;
   const cards = [
     { icon: 'bi-wallet2', tint: 't1', label: 'Invested', value: rupees(t.invested, false),
-      sub: `<span class="stat-sub">${t.positions || 0} positions · ${t.members || 0} people</span>` },
+      sub: `<span class="stat-sub">${scope}</span>` },
     { icon: 'bi-cash-stack', tint: 't2', label: 'Current value', value: rupees(t.current, false),
       sub: '' },
     { icon: 'bi-graph-up-arrow', tint: 't3', label: 'Total P&L', value: signed(t.pnl),
-      sub: pctBadge(t.pnl_pct) },
+      sub: pctBadge(t.pnl_pct)
+        + (unpriced
+          ? `<span class="stat-sub">on ${rupees(t.invested_priced, false)} priced · `
+            + `${unpriced} without a price</span>`
+          : '') },
     { icon: 'bi-lightning-charge', tint: 't4', label: 'Today', value: signed(t.day_change),
       sub: pctBadge(t.day_change_pct) },
   ];
