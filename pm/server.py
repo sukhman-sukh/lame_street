@@ -19,7 +19,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -40,6 +40,10 @@ mimetypes.add_type("font/woff2", ".woff2")
 mimetypes.add_type("font/woff", ".woff")
 
 MAIL_SYNC_COOLDOWN = timedelta(minutes=5)
+
+# Generous on purpose: a year's consolidated account statement is a big PDF, and
+# the mail path already accepts attachments this size.
+MAX_STATEMENT = 25 * 1024 * 1024
 
 app = FastAPI(title="LameStreet", docs_url=None, redoc_url=None)
 app.include_router(admin_router)
@@ -205,6 +209,49 @@ def refresh():
     """Prices only: free, fast, safe to press often."""
     _run_job("refresh", _do_refresh)
     return {"started": True, "kind": "refresh"}
+
+
+@app.post("/api/statement")
+async def upload_statement(
+    file: UploadFile = File(...),
+    member: str = Form(""),
+    sync_after: bool = Form(True),
+):
+    """Set holdings from a statement PDF, then read the mail that came after it.
+
+    The recovery path for a month the sync missed: the document fixes the position
+    on its own date, and the follow-up sync walks forward from there so every
+    contract note since is applied on top.
+    """
+    blob = await file.read()
+    if len(blob) > MAX_STATEMENT:
+        raise HTTPException(413, "that file is larger than 25 MB")
+    if not blob.strip():
+        raise HTTPException(422, "the file is empty")
+
+    cfg = cfgmod.load()
+    result = ingest.ingest_statement(
+        cfg, blob, filename=file.filename or "statement.pdf",
+        member_id=member.strip() or None,
+        # Rewinding without reading afterwards would leave the next ordinary sync
+        # to re-download weeks of mail unannounced.
+        rewind=sync_after,
+    )
+    if not result.get("ok"):
+        raise HTTPException(422, result.get("detail") or "could not read that statement")
+
+    buildmod.build()
+
+    started = False
+    if sync_after and cfg.mailboxes():
+        try:
+            # Deliberate action, so it skips the refresh-button cooldown.
+            _run_job("sync", lambda: _do_sync(False))
+            started = True
+        except HTTPException:
+            result["notes"] = list(result.get("notes", [])) + [
+                "another job is already running — press Sync when it finishes"]
+    return {**result, "sync_started": started}
 
 
 @app.post("/api/sync")

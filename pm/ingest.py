@@ -8,6 +8,7 @@ document. Header matching is only a fallback for unencrypted mail.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from dataclasses import dataclass, field
@@ -20,7 +21,7 @@ from . import config as cfgmod
 from . import instruments, paths
 from .config import Config, Member
 from .events import IST, now_ist
-from .mailbox import Attachment, MailReader, archive, load_archived
+from .mailbox import Attachment, MailDoc, MailReader, archive, load_archived
 from .parsers import contract_note, holdings
 from .pdfutil import PdfLocked, extract_tables, extract_text, unlock
 from .store import append_jsonl, read_json, read_jsonl, write_json
@@ -36,7 +37,7 @@ SNAPSHOT_TIME = time(23, 59)
 # Bumped whenever a parser changes what it would extract. Documents are recorded
 # against it, so a routine run re-reads nothing, while a parser fix invalidates
 # the whole archive on purpose and re-derives it.
-PARSER_VERSION = "2026-08-12.2"
+PARSER_VERSION = "2026-08-14.1"
 
 PARSED_LEDGER = paths.STATE / "parsed.json"
 
@@ -390,13 +391,127 @@ def sync_mail(cfg: Config, *, full: bool = False) -> SyncReport:
     return report
 
 
-def _supersede_derived_events() -> tuple[int, int, Path | None]:
+def rewind_mailboxes(cfg: Config, member_id: str, when: date) -> list[str]:
+    """Point every inbox serving this member back at `when`.
+
+    A statement states the position on its date, so everything that matters after
+    it is a trade — and the incremental cursor normally resumes from the last
+    message already seen, which skips precisely that stretch. Rewinding lets the
+    next sync walk forward from the statement's own date instead.
+
+    Two people can share one inbox, so a rewind can pull a little extra mail for
+    somebody else. That costs time and nothing else: ingestion is idempotent.
+    """
+    state = load_sync_state()
+    state.setdefault("mailboxes", {})
+    rewound: list[str] = []
+    for mb, members in cfg.mailboxes():
+        if not any(m.id == member_id for m in members):
+            continue
+        key = f"{mb.user}@{mb.host}/{mb.folder}"
+        entry = state["mailboxes"].setdefault(key, {})
+        # last_uid beats any date window in the IMAP search, so it has to go —
+        # leaving it set would make the rewind silently do nothing.
+        entry["last_uid"] = None
+        entry["last_fetch_at"] = ev.iso(datetime.combine(when, time(0, 0), tzinfo=IST))
+        rewound.append(mb.user)
+    save_sync_state(state)
+    return rewound
+
+
+def ingest_statement(
+    cfg: Config, data: bytes, *, filename: str, member_id: str | None = None,
+    rewind: bool = True,
+) -> dict:
+    """Ingest a holdings statement handed over directly instead of found in mail.
+
+    The point of it is recovery. When a month's statement never arrives — or
+    arrives somewhere the sync cannot see it — this sets the position to what the
+    document says and rewinds the mail cursor to the document's own date, so the
+    next sync reads every contract note after it and brings the numbers forward.
+
+    Naming a member restricts identification to their statement password, which is
+    what makes an unencrypted document attributable at all. Without one, the
+    password decides the owner exactly as it does for mail.
+    """
+    members = cfg.active_members()
+    if member_id:
+        member = cfg.member(member_id)
+        if not member:
+            return {"ok": False, "detail": f"no member called {member_id!r}"}
+        members = [member]
+    if not members:
+        return {"ok": False, "detail": "no active members to attribute this to"}
+
+    att = Attachment(filename=filename or "statement.pdf",
+                     content_type="application/pdf", data=data)
+    if not att.is_pdf:
+        return {"ok": False, "detail": "that is not a PDF"}
+
+    # Keyed by content, so uploading the same file twice is recognised as the same
+    # document rather than archived again under a new name.
+    doc_ref = f"<upload-{hashlib.sha256(data).hexdigest()[:16]}@lamestreet.local>"
+    report, produced = process_attachment(
+        att, subject=f"Uploaded statement: {filename}", mail_date=now_ist().date(),
+        members=members, recipients=[], doc_ref=doc_ref,
+    )
+
+    if report.member is None:
+        return {"ok": False, "detail": "; ".join(report.notes) or "could not identify the owner",
+                "notes": report.notes}
+    if report.kind != "holdings_statement" or not produced:
+        looked_like = report.kind.replace("_", " ") if report.kind != "unknown" else "nothing known"
+        return {"ok": False, "notes": report.notes,
+                "detail": f"this reads as {looked_like}, not a holdings statement — "
+                          "upload the demat/holdings statement that lists every "
+                          "position with its quantity"}
+
+    snapshot = produced[0]
+    as_of = date.fromisoformat(snapshot["ts"][:10])
+
+    # Archive before appending, so the document behind the snapshot is always
+    # recoverable — a re-parse can then re-derive it like any other statement.
+    archive(MailDoc(
+        uid="", message_id=doc_ref, subject=f"Uploaded statement: {filename}",
+        sender="upload", recipients=[], body="",
+        date=datetime.combine(as_of, time(12, 0), tzinfo=IST),
+        attachments=[att], uploaded=True,
+    ))
+
+    written, dupes = ev.append(produced)
+    ledger = load_parsed()
+    record_parsed(ledger, doc_ref, [report], len(produced))
+    save_parsed(ledger)
+
+    registry = instruments.load_registry()
+    for row in snapshot["holdings"]:
+        instruments.resolve(registry, isin=row.get("isin"), symbol=row["symbol"],
+                            name=row.get("name", ""))
+    instruments.save_registry(registry)
+
+    return {
+        "ok": True,
+        "member": report.member,
+        "as_of": as_of.isoformat(),
+        "positions": len(snapshot["holdings"]),
+        "new": bool(written),
+        "duplicate": bool(dupes and not written),
+        "rewound": rewind_mailboxes(cfg, report.member, as_of) if rewind else [],
+        "notes": report.notes,
+    }
+
+
+def _supersede_derived_events(types: tuple[str, ...] | None = None) -> tuple[int, int, Path | None]:
     """Set aside every event that came from a document, keeping manual entries.
 
     Needed when a parser was wrong rather than merely incomplete. Deterministic
     IDs make re-parsing safe against *duplicates*, but they can't retract an
     event that shouldn't have existed — and a wrong snapshot is destructive,
     because a snapshot supersedes the log.
+
+    `types` narrows it to certain event types. A fix to the holdings parser has no
+    business retiring years of trades it cannot re-derive, and the trades are the
+    part of the log that nothing else can reconstruct.
 
     Nothing is deleted: the old shards move into a timestamped folder so the
     original interpretation stays auditable.
@@ -409,10 +524,12 @@ def _supersede_derived_events() -> tuple[int, int, Path | None]:
     dropped = 0
     for shard in shards:
         for row in read_jsonl(shard):
-            if row.get("source") in (ev.SRC_MANUAL, ev.SRC_CSV):
-                kept.append(row)
-            else:
+            derived = row.get("source") not in (ev.SRC_MANUAL, ev.SRC_CSV)
+            in_scope = types is None or row.get("type") in types
+            if derived and in_scope:
                 dropped += 1
+            else:
+                kept.append(row)
 
     backup = paths.EVENTS / f"superseded-{now_ist():%Y%m%d-%H%M%S}"
     backup.mkdir(parents=True, exist_ok=True)
@@ -428,7 +545,8 @@ def _supersede_derived_events() -> tuple[int, int, Path | None]:
     return len(kept), dropped, backup
 
 
-def reparse_archive(cfg: Config, *, rebuild: bool = False, force: bool = False) -> SyncReport:
+def reparse_archive(cfg: Config, *, rebuild: bool = False, snapshots: bool = False,
+                    force: bool = False) -> SyncReport:
     """Re-run every archived document through the parsers.
 
     Deterministic IDs make this safe to run as often as you like — after a parser
@@ -437,6 +555,12 @@ def reparse_archive(cfg: Config, *, rebuild: bool = False, force: bool = False) 
     `rebuild` additionally retires the events that earlier parses produced, which
     is what you want when a parser was reading a document *wrongly* rather than
     failing to read it.
+
+    `snapshots` does the same for holdings snapshots alone. That is the mode a
+    holdings-parser fix wants: a misread snapshot has to be retired, because it
+    supersedes the log and no amount of re-parsing can undo it, while the trades
+    stay exactly as they are. A whole-log rebuild would also retire every trade,
+    and any contract note the parsers cannot read today would be lost with it.
     """
     report = SyncReport(started_at=ev.iso(now_ist()))
     members = cfg.active_members()
@@ -444,10 +568,16 @@ def reparse_archive(cfg: Config, *, rebuild: bool = False, force: bool = False) 
     ledger = load_parsed()
     # A rebuild retires the existing events, so every document has to be read
     # again regardless of what the ledger says.
-    force = force or rebuild
+    force = force or rebuild or snapshots
     skipped = 0
 
-    for meta, attachments in load_archived(cfg.effective_sources().senders):
+    # A statement forwarded by hand arrives from the member's own address, not the
+    # broker's, so filtering the archive on broker senders alone hides it from a
+    # re-parse — and with it whatever month the automatic feed missed.
+    senders = cfg.effective_sources().senders + [
+        email.lower() for member in members for email in member.emails if email
+    ]
+    for meta, attachments in load_archived(senders):
         if not attachments:
             continue
         key = meta.get("message_id") or meta.get("date", "")
@@ -479,12 +609,16 @@ def reparse_archive(cfg: Config, *, rebuild: bool = False, force: bool = False) 
     # Retire the old interpretation only once the new one is in hand. Doing it
     # the other way round means a re-parse that can read nothing — a missing
     # statement password, say — empties the log and takes the dashboard with it.
-    if rebuild:
+    if rebuild or snapshots:
+        scope = (ev.SNAPSHOT,) if snapshots else None
+        in_scope = lambda e: scope is None or e.get("type") in scope   # noqa: E731
         derived = [e for e in ev.all_events()
-                   if e.get("source") not in (ev.SRC_MANUAL, ev.SRC_CSV)]
-        if derived and len(pending) < len(derived) * 0.5:
+                   if e.get("source") not in (ev.SRC_MANUAL, ev.SRC_CSV) and in_scope(e)]
+        replacements = [e for e in pending if in_scope(e)]
+        if derived and len(replacements) < len(derived) * 0.5:
+            what = "snapshot(s)" if snapshots else "event(s)"
             report.errors.append(
-                f"Refusing to rebuild: re-parsing produced {len(pending)} event(s) "
+                f"Refusing to rebuild: re-parsing produced {len(replacements)} {what} "
                 f"where the log already holds {len(derived)}. Something is stopping "
                 "the documents being read — most likely a missing statement "
                 "password. The log has been left untouched."
@@ -492,13 +626,14 @@ def reparse_archive(cfg: Config, *, rebuild: bool = False, force: bool = False) 
             report.finished_at = ev.iso(now_ist())
             return report
 
-        kept, dropped, backup = _supersede_derived_events()
+        kept, dropped, backup = _supersede_derived_events(scope)
         if backup:
             report.documents.append(DocReport(
                 slug="rebuild", subject="Retired earlier interpretations",
                 date=now_ist().date().isoformat(), status="parsed",
-                notes=[f"kept {kept} manual event(s), retired {dropped} "
-                       f"document-derived event(s); previous log saved in {backup.name}"],
+                notes=[f"kept {kept} event(s), retired {dropped} "
+                       f"document-derived {'snapshot' if snapshots else 'event'}(s); "
+                       f"previous log saved in {backup.name}"],
             ))
 
     written, dupes = ev.append(pending)

@@ -68,6 +68,10 @@ class MailDoc:
     date: datetime
     body: str
     attachments: list[Attachment] = field(default_factory=list)
+    # Handed to us directly rather than found in a mailbox. Recorded in the
+    # archive so a later re-parse keeps it: an uploaded document has no broker
+    # sender to match, and the sender filter would otherwise drop it.
+    uploaded: bool = False
 
     @property
     def slug(self) -> str:
@@ -320,6 +324,7 @@ def archive(doc: MailDoc) -> None:
         "date": doc.date.isoformat(),
         "body": doc.body[:20000],
         "attachments": [a.filename for a in doc.attachments],
+        "upload": doc.uploaded,
     })
     for i, att in enumerate(doc.attachments):
         safe = re.sub(r"[^A-Za-z0-9._-]", "_", att.filename) or f"attachment-{i}"
@@ -349,7 +354,9 @@ def load_archived(senders: list[str] | None = None) -> Iterator[tuple[dict, list
         meta = read_json(meta_path)
         if not meta:
             continue
-        if wanted:
+        # An uploaded document was handed over deliberately, so it is never
+        # filtered out — there is no broker sender on it to match against.
+        if wanted and not meta.get("upload"):
             sender = (meta.get("from") or "").lower()
             if not any(s in sender for s in wanted):
                 continue

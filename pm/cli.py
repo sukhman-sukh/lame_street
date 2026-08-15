@@ -178,14 +178,59 @@ def cmd_sync(args) -> int:
     return 1 if report.errors else 0
 
 
+def cmd_statement(args) -> int:
+    """Set holdings from a statement PDF, then read the mail that came after it."""
+    cfg = cfgmod.load()
+    path = Path(args.file)
+    if not path.exists():
+        _say(f"{RED}No such file:{RESET} {path}")
+        return 1
+
+    _say(f"Reading {path.name}…")
+    result = ingest.ingest_statement(
+        cfg, path.read_bytes(), filename=path.name,
+        member_id=args.member, rewind=not args.no_sync,
+    )
+    for note in result.get("notes", []):
+        _say(f"  {DIM}{note}{RESET}")
+    if not result.get("ok"):
+        _say(f"{RED}✗{RESET} {result.get('detail')}")
+        return 1
+
+    state = ("new snapshot" if result["new"]
+             else "identical to one already recorded" if result["duplicate"] else "recorded")
+    _say(f"{GREEN}✓{RESET} {result['member']} · {result['positions']} positions "
+         f"as of {result['as_of']} {DIM}({state}){RESET}")
+
+    if args.no_sync:
+        buildmod.build()
+        _say(f"{GREEN}Dashboard rebuilt.{RESET} {DIM}Mail cursor left where it was.{RESET}")
+        return 0
+
+    if result["rewound"]:
+        _say(f"  rewound to {result['as_of']}: {', '.join(result['rewound'])}")
+    _say("Reading everything that came after it…")
+    report = ingest.sync_mail(cfg)
+    write_json(buildmod.LAST_SYNC, report.to_dict())
+    _print_sync(report)
+    cmd_prices(args)
+    buildmod.build()
+    _say(f"{GREEN}Dashboard rebuilt.{RESET}")
+    return 1 if report.errors else 0
+
+
 def cmd_reparse(args) -> int:
     cfg = cfgmod.load()
     if args.rebuild:
         _say("Rebuilding the log from archived documents "
              f"{DIM}(manual entries kept, earlier interpretations set aside){RESET}…")
+    elif args.snapshots:
+        _say("Rebuilding holdings snapshots from archived statements "
+             f"{DIM}(trades and manual entries left untouched){RESET}…")
     else:
         _say("Re-parsing archived documents…")
-    report = ingest.reparse_archive(cfg, rebuild=args.rebuild, force=args.all)
+    report = ingest.reparse_archive(cfg, rebuild=args.rebuild,
+                                    snapshots=args.snapshots, force=args.all)
     _print_sync(report)
     cmd_prices(args)
     buildmod.build()
@@ -238,6 +283,11 @@ def cmd_import_csv(args) -> int:
         _say(f"{RED}No member {args.member}.{RESET}")
         return 1
     rows, notes = manual.read_holdings_csv(Path(args.file))
+    if rows:
+        from .replay import replay
+        rows, match_notes = manual.match_to_holdings(
+            rows, replay()["holdings"].get(args.member, []))
+        notes += match_notes
     for note in notes:
         _say(f"  {YELLOW}note{RESET}: {note}")
     if not rows:
@@ -528,6 +578,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-prices", action="store_true")
     s.set_defaults(fn=cmd_sync)
 
+    st = sub.add_parser("statement",
+                        help="set holdings from a statement PDF, then sync the mail after it")
+    st.add_argument("file", help="the holdings/demat statement PDF")
+    st.add_argument("--member", help="who it belongs to; by default the statement "
+                                     "password decides, as it does for mail")
+    st.add_argument("--no-sync", action="store_true",
+                    help="record the statement only — don't rewind the mail cursor "
+                         "or read anything after it")
+    st.add_argument("--no-prices", action="store_true")
+    st.set_defaults(fn=cmd_statement)
+
     rp = sub.add_parser("reparse", help="re-run parsers over archived mail")
     rp.add_argument("--all", action="store_true",
                     help="re-read every archived document, even ones this parser "
@@ -535,6 +596,9 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--rebuild", action="store_true",
                     help="also retire events from earlier parses (keeps manual entries; "
                          "use when a parser was reading a document wrongly)")
+    rp.add_argument("--snapshots", action="store_true",
+                    help="retire and re-derive holdings snapshots only, leaving trades "
+                         "alone (use after a fix to the holdings parser)")
     rp.set_defaults(fn=cmd_reparse)
     sub.add_parser("prices", help="refresh prices only").set_defaults(fn=cmd_prices)
     sub.add_parser("build", help="rebuild dashboard.json").set_defaults(fn=cmd_build)
