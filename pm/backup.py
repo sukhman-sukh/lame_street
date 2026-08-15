@@ -2,9 +2,10 @@
 
 Free container hosts wipe the disk on every restart. Almost everything here
 survives that by design — raw mail lives in Gmail, prices come from Yahoo,
-the dashboard is derived — but three things exist nowhere else: config.json,
+the dashboard is derived — but four things exist nowhere else: config.json,
 the event log (which carries the one-time holdings imports and their cost
-basis), and the manual ISIN mappings in data/state. Together they are a few
+basis), the manual ISIN mappings in data/state, and any document handed to
+the app by hand rather than found in a mailbox. Together they are a few
 megabytes.
 
 So: tar those, encrypt them, and PUT the single blob into a private GitHub
@@ -35,6 +36,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 from . import env, paths
+from .store import read_json
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +47,15 @@ _SALT_LEN = 16
 # are re-fetchable but weigh a few KB, and carrying them means a restored host
 # can render a complete dashboard before its first price refresh.
 _INCLUDE = ("config.json", "data/events", "data/snapshots", "data/state", "data/prices")
+
+# data/raw is left out because it is re-fetchable — it is a cache of Gmail, and
+# ninety megabytes of it. That holds for everything the sync downloaded, and for
+# nothing that was handed over by hand: an uploaded export never went through a
+# mailbox, and a forwarded statement arrived from an address the sync filters do
+# not match. Those exist on this disk and nowhere else, so they travel with the
+# backup. They are the documents the holdings are anchored to, and they are
+# kilobytes.
+_RAW = "data/raw"
 
 
 def settings() -> tuple[str, str, str]:
@@ -81,10 +92,29 @@ def _decrypt(passphrase: str, blob: bytes) -> bytes:
 
 # ------------------------------------------------------------------ tarball
 
+def uploaded_documents() -> list[str]:
+    """Archived documents that came from a person rather than a mailbox.
+
+    Recognised by the `upload` flag their meta.json carries, which is written when
+    a statement or an export is handed to the app directly.
+    """
+    root = paths.ROOT / _RAW
+    if not root.exists():
+        return []
+    found = []
+    for meta in sorted(root.glob("*/*/meta.json")):
+        try:
+            if (read_json(meta) or {}).get("upload"):
+                found.append(str(meta.parent.relative_to(paths.ROOT)))
+        except Exception:
+            continue
+    return found
+
+
 def _pack() -> bytes:
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
-        for rel in _INCLUDE:
+        for rel in list(_INCLUDE) + uploaded_documents():
             target = paths.ROOT / rel
             if target.exists():
                 tar.add(target, arcname=rel)

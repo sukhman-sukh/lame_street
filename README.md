@@ -117,7 +117,10 @@ after; with nothing attached it is an ordinary sync. The Setup tab's **Sync
 holdings from CSV** panel does the import alone, without reading mail.
 
 The uploaded file is archived under `data/raw/` beside the statements, so the
-document that anchors a portfolio is as recoverable as everything else.
+document that anchors a portfolio is as recoverable as everything else — and it
+travels with the encrypted backup. The rest of `data/raw` does not, because it is
+a re-fetchable cache of Gmail; an uploaded export never went through a mailbox, so
+it exists on that disk and nowhere else.
 
 **An export takes precedence over the mail.** Once you upload one for someone,
 their holdings are that export plus the trades after it — depository statements
