@@ -567,6 +567,12 @@ function renderSetup() {
       NSE's list and from what the person already holds, so a re-upload updates the same
       positions rather than duplicating them. Anything it can't match is reported.
     </p>
+    <p class="help muted">
+      Once uploaded, the export takes precedence: that person's holdings become the export
+      plus the trades after it, and depository statements arriving later no longer override
+      it — they are compared against it and any disagreement is raised under
+      <b>Needs a look</b>. Without an export, the holdings statements from email are used.
+    </p>
     <form class="form-row" id="form-holdings">
       <select class="form-select" name="member" required>
         <option value="">Who is this for…</option>${memberOptions}

@@ -110,6 +110,18 @@ master list. Without the matching, an upload would key on the name and create a
 *second* position for every company already held; anything still unmatched is
 reported rather than guessed at.
 
+**An export takes precedence over the mail.** Once you upload one for someone,
+their holdings are that export plus the trades after it — depository statements
+arriving later no longer override it. They are still read and compared, and any
+disagreement is raised under **Needs a look**, but they cannot overwrite what the
+broker itself reported. If nobody has uploaded an export, the holdings statements
+from the mail are the anchor, exactly as before.
+
+The tradeoff is worth knowing: a bonus issue or a split only ever appears in a
+depository statement, so once an export is in force those stop being absorbed
+automatically. They show up as a `statement_disagrees` warning instead, and
+uploading a fresh export clears it.
+
 ### 3. Refresh the NSE list
 
 One click. Maps ISINs to trading symbols and prices using NSE's published equity

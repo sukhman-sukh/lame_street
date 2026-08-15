@@ -461,6 +461,73 @@ def uploaded_statement_sets_holdings_and_rewinds() -> None:
           "cursor was rewound despite rewind=False")
 
 
+def an_export_outranks_the_statements_that_follow_it() -> None:
+    """Once an export states a book, the mail no longer overrides it.
+
+    Depository statements carry quantity and nothing else, so they cannot say what
+    anything cost. An uploaded export can. So the export anchors the book and the
+    trades after it carry it forward; statements arriving later are checked against
+    it and reported, never applied.
+    """
+    from datetime import datetime as _datetime
+
+    from pm.events import IST
+
+    print("\n\033[1mExport takes precedence over statements\033[0m")
+
+    def snap(day, source, rows, has_cost=False):
+        return ev.make_snapshot(
+            member="nina", ts=_datetime(2026, day, 15, 23, 59, tzinfo=IST),
+            holdings=[{"isin": i, "symbol": s, "name": s, "qty": q, "avg": a}
+                      for i, s, q, a in rows],
+            source=source, has_cost=has_cost)
+
+    def buy(day, isin, sym, qty, price):
+        return ev.make_trade(member="nina", ts=_datetime(2026, day, 20, 15, 30, tzinfo=IST),
+                             side="buy", isin=isin, symbol=sym, qty=qty, price=price,
+                             source=ev.SRC_CONTRACT_NOTE)
+
+    A, B = "INE900Z01010", "INE901Z01018"
+
+    # Export in March, then a statement in April that disagrees, then a trade.
+    log = [
+        snap(3, ev.SRC_CSV, [(A, "AAA", 100, 50.0), (B, "BBB", 200, 10.0)], has_cost=True),
+        snap(4, ev.SRC_HOLDINGS_STATEMENT, [(A, "AAA", 900, None)]),
+        buy(5, A, "AAA", 50, 60.0),
+    ]
+    held = {p["symbol"]: p for p in replay(log)["holdings"]["nina"]}
+    check("a statement after an export does not overwrite its quantities",
+          held["AAA"]["qty"] == 150, f"got {held['AAA']['qty']}")
+    check("a holding the later statement omits is not retired",
+          held.get("BBB", {}).get("qty") == 200, f"got {held.get('BBB')}")
+    check("cost from the export survives, and the trade after it is applied",
+          abs(held["AAA"]["cost"] - (100 * 50.0 + 50 * 60.0)) < 0.01,
+          f"got {held['AAA']['cost']}")
+
+    warned = [w for w in replay(log)["warnings"] if w["kind"] == "statement_disagrees"]
+    check("the statement's disagreement is reported rather than hidden",
+          len(warned) == 1 and "AAA" in warned[0]["detail"], f"got {warned}")
+
+    # With no export, the statements are the only anchor and still apply.
+    mail_only = [
+        snap(3, ev.SRC_HOLDINGS_STATEMENT, [(A, "AAA", 100, 50.0)], has_cost=True),
+        snap(4, ev.SRC_HOLDINGS_STATEMENT, [(A, "AAA", 900, None)]),
+    ]
+    held = {p["symbol"]: p for p in replay(mail_only)["holdings"]["nina"]}
+    check("without an export, a later statement still corrects the quantity",
+          held["AAA"]["qty"] == 900, f"got {held['AAA']['qty']}")
+
+    # A newer export replaces an older one.
+    two = [
+        snap(3, ev.SRC_CSV, [(A, "AAA", 100, 50.0)], has_cost=True),
+        snap(6, ev.SRC_CSV, [(A, "AAA", 400, 70.0)], has_cost=True),
+    ]
+    held = {p["symbol"]: p for p in replay(two)["holdings"]["nina"]}
+    check("the latest export is the one in force",
+          held["AAA"]["qty"] == 400 and abs(held["AAA"]["avg"] - 70.0) < 0.01,
+          f"got qty={held['AAA']['qty']} avg={held['AAA']['avg']}")
+
+
 def csv_rows_land_on_the_right_positions() -> None:
     """A broker export names companies; positions are keyed by ISIN.
 
@@ -694,12 +761,16 @@ def main() -> int:
         rows=[{"isin": "INE002A01018", "symbol": "RELIANCE", "qty": 25, "avg": 1380.50},
               {"isin": "INE009A01021", "symbol": "INFY", "qty": 30, "avg": 1495.80}],
         when=date(2026, 8, 1), source=ev.SRC_CSV)])
+    # Priya's opening comes from a broker's own holdings *report* — it carries cost,
+    # but it arrived in the mail, so the depository statements that follow still
+    # supersede it. That is the path taken by anyone who has never uploaded an
+    # export, and it is what keeps bonus issues and splits being absorbed.
     ev.append([manual.set_holdings(
         member="priya",
         rows=[{"isin": "INE002A01018", "symbol": "RELIANCE", "qty": 12, "avg": 1402.10},
               {"isin": "INE154A01025", "symbol": "ITC", "qty": 150, "avg": 412.60},
               {"isin": "INE155A01022", "symbol": "TATAMOTORS", "qty": 60, "avg": 690.40}],
-        when=date(2026, 8, 1), source=ev.SRC_CSV)])
+        when=date(2026, 8, 1), source=ev.SRC_HOLDINGS_STATEMENT)])
 
     written, _ = ev.append(trades)
     check("trades appended", written == 2, f"wrote {written}")
@@ -737,6 +808,7 @@ def main() -> int:
           f"warnings: {state['warnings']}")
 
     uploaded_statement_sets_holdings_and_rewinds()
+    an_export_outranks_the_statements_that_follow_it()
     csv_rows_land_on_the_right_positions()
     incomplete_statements_do_not_erase_positions()
     real_document_layouts()

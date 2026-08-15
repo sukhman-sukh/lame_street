@@ -11,14 +11,51 @@ invested fixed and let quantity move, so the average recomputes on its own. That
 happens to be exactly the right accounting for a bonus issue or a stock split —
 you own more shares, you paid nothing extra, your average falls. Those two events
 are the main reason derived state drifts, and this rule absorbs them for free.
+
+Which snapshot wins is decided by where it came from, not only by when:
+
+    an uploaded export, then the trades after it
+    — or, if there has never been one, the holdings statements from the mail
+
+An export is the broker's own view and states cost; a statement is the
+depository's and cannot. So an export anchors the book, and statements arriving
+after it are checked against it and reported rather than applied. The cost of that
+rule is that a bonus or split — which only ever shows up in a statement — stops
+being absorbed automatically once an export is in force; it surfaces as a
+`statement_disagrees` warning instead, and a fresh export clears it.
 """
 from __future__ import annotations
 
 from collections import defaultdict
 
-from .events import ADJUSTMENT, SNAPSHOT, TRADE, all_events
+from .events import (
+    ADJUSTMENT,
+    SNAPSHOT,
+    SRC_BROWSER,
+    SRC_CSV,
+    SRC_MANUAL,
+    TRADE,
+    all_events,
+)
 
 EPS = 1e-6
+
+# How much a snapshot is worth when two of them disagree.
+#
+# A broker's own export states quantity *and* what was paid. A depository
+# statement states quantity alone — it is the custodian's record of what sits in
+# the demat account, and it has no idea what any of it cost. So once an export has
+# anchored a member's book, a statement arriving later no longer supersedes it:
+# the book carries forward from the export and the trades after it.
+#
+# Deliberately narrow: only something a person handed over on purpose — an export,
+# a browser fetch, a manual entry — outranks the mail. A statement that happens to
+# carry cost is still just mail, and still gets superseded by the next one.
+ANCHOR_SOURCES = (SRC_CSV, SRC_BROWSER, SRC_MANUAL)
+
+
+def _rank(ev: dict) -> int:
+    return 2 if ev.get("source") in ANCHOR_SOURCES else 1
 
 
 def _key(isin: str | None, symbol: str) -> str:
@@ -59,6 +96,7 @@ def replay(events: list[dict] | None = None) -> dict:
     activity: list[dict] = []
     last_snapshot: dict[str, dict] = {}   # member -> {ts, source, has_cost}
     last_trade: dict[str, str] = {}
+    anchored: dict[str, int] = {}         # member -> rank of the snapshot in force
 
     for ev in events:
         member = ev.get("member")
@@ -105,6 +143,44 @@ def replay(events: list[dict] | None = None) -> dict:
             })
 
         elif etype == SNAPSHOT:
+            rank = _rank(ev)
+            if rank < anchored.get(member, 0):
+                # Outranked: an export already states this book, cost and all, so a
+                # quantity-only statement no longer supersedes it. It is still the
+                # depository's own count though, so it gets checked against what we
+                # hold and any disagreement is reported rather than dropped —
+                # otherwise a missed contract note could drift unnoticed forever.
+                disagreed = []
+                listed = set()
+                for row in ev.get("holdings", []):
+                    key = _key(row.get("isin"), row.get("symbol", ""))
+                    listed.add(key)
+                    have = (book.get(key) or {}).get("qty", 0.0)
+                    want = float(row["qty"])
+                    if abs(have - want) > EPS:
+                        disagreed.append(f"{row.get('symbol') or key} {have:g}→{want:g}")
+                for key, pos in book.items():
+                    if key not in listed and pos["qty"] > EPS:
+                        disagreed.append(f"{pos['symbol']} {pos['qty']:g}→0")
+                if disagreed:
+                    warnings.append({
+                        "member": member, "kind": "statement_disagrees", "ts": ev["ts"],
+                        "symbol": None,
+                        "detail": "a holdings statement disagrees with the uploaded export "
+                                  "that supersedes it: " + ", ".join(disagreed[:8])
+                                  + (f" (+{len(disagreed) - 8} more)" if len(disagreed) > 8 else "")
+                                  + " — upload a fresh export if the statement is right",
+                        "source": ev.get("source"),
+                    })
+                activity.append({
+                    "ts": ev["ts"], "member": member, "kind": "snapshot",
+                    "text": f"Holdings statement — {len(ev.get('holdings', []))} positions "
+                            "(not applied; an uploaded export is in force)",
+                    "source": ev.get("source"),
+                })
+                continue
+            anchored[member] = rank
+
             has_cost = bool(ev.get("has_cost"))
             seen: set[str] = set()
             drift: list[str] = []
