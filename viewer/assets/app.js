@@ -535,22 +535,54 @@ function renderSetup() {
   </section>
 
   <section class="panel card">
-    <div class="panel-head"><h2><i class="bi bi-file-earmark-arrow-up"></i>Starting holdings</h2>
-      <span class="hint">Needed once per person</span></div>
+    <div class="panel-head"><h2><i class="bi bi-file-earmark-arrow-up"></i>Sync holdings from CSV</h2>
+      <span class="hint">The only source of cost basis</span></div>
     <div class="card-body">
     <p class="help">
-      Broker and depository statements list what you own but never what you paid, so the first
-      cost basis has to come from the broker. In Groww: <b>Reports → Holdings → download</b>,
-      then upload that file here. After this, contract notes keep it current on their own.
+      Depository statements list what you own but never what you paid, so for anything bought
+      before the mailbox history begins, no document states its cost. A broker's own export
+      does. Uploading one sets that person's quantities <i>and</i> average prices to exactly
+      what it says — run it whenever P&amp;L looks wrong, not just the first time.
+      In Groww: <b>Reports → Holdings → download</b>. Zerodha: <b>Console → Portfolio →
+      Holdings → download</b>. Dhan: <b>Portfolio → Holdings → export</b>.
+    </p>
+    <p class="help muted">
+      Rows are matched to existing positions by ISIN, looked up from the company name via
+      NSE's list and from what the person already holds, so a re-upload updates the same
+      positions rather than duplicating them. Anything it can't match is reported.
     </p>
     <form class="form-row" id="form-holdings">
       <select class="form-select" name="member" required>
         <option value="">Who is this for…</option>${memberOptions}
       </select>
       <input class="form-control" name="file" type="file" accept=".csv,text/csv" required>
-      <button class="btn btn-primary" type="submit"><i class="bi bi-upload"></i>Upload</button>
+      <button class="btn btn-primary" type="submit"><i class="bi bi-upload"></i>Upload &amp; sync</button>
     </form>
     <p class="msg" id="msg-holdings"></p>
+    </div>
+  </section>
+
+  <section class="panel card">
+    <div class="panel-head"><h2><i class="bi bi-arrow-repeat"></i>Sync from a statement</h2>
+      <span class="hint">When a month went missing</span></div>
+    <div class="card-body">
+    <p class="help">
+      Upload the latest holdings or demat statement PDF. Quantities are set to exactly what
+      it says on its own date, then the mail cursor rewinds to that date and every contract
+      note since is read and applied on top. Use this when a statement never arrived by
+      mail, or when the numbers have drifted and you want them reset against the depository.
+      Encrypted statements are fine — the password identifies the owner.
+    </p>
+    <form class="form-row" id="form-statement">
+      <select class="form-select" name="member">
+        <option value="">Let the password decide…</option>${memberOptions}
+      </select>
+      <input class="form-control" name="file" type="file" accept=".pdf,application/pdf" required>
+      <button class="btn btn-primary" type="submit"><i class="bi bi-upload"></i>Upload &amp; sync</button>
+    </form>
+    <label class="check"><input type="checkbox" class="form-check-input" id="statement-nosync">
+      Record the statement only — don't read mail afterwards</label>
+    <p class="msg" id="msg-statement"></p>
     </div>
   </section>
 
@@ -819,13 +851,53 @@ function wireSetup() {
       const res = await send(`/api/members/${encodeURIComponent(member)}/holdings`,
         { form: upload });
       holdingsForm.reset();
+      const who = SETUP.members.find((m) => m.id === member);
       const cost = res.with_cost === res.positions
         ? 'all with purchase cost'
         : `${res.with_cost} of ${res.positions} with purchase cost`;
+      const money = (n) => (n == null ? '—' : `₹${Math.round(n).toLocaleString('en-IN')}`);
+      const bits = [`Set ${esc(who ? who.name : member)} to ${res.positions} positions (${cost}).`,
+        `Invested now ${money(res.invested)}.`];
+      if (res.cost_unknown) bits.push(`${res.cost_unknown} still without cost.`);
+      if (res.unmatched) bits.push(`${res.unmatched} row(s) had no ISIN — check the notes.`);
       const notes = (res.notes || []).length
         ? `<br><span class="muted">${esc(res.notes.join('; '))}</span>` : '';
-      return `Loaded ${res.positions} positions (${cost}).${notes}`;
+      return `${bits.join(' ')}${notes}`;
     }));
+  }
+
+  const statementForm = $('#form-statement');
+  if (statementForm) {
+    // rerender is off: the follow-up sync is what changes the numbers, and it is
+    // still running when this returns. poll() reloads once it finishes.
+    statementForm.addEventListener('submit', action('msg-statement', async () => {
+      const f = new FormData(statementForm);
+      const file = f.get('file');
+      if (!file || !file.size) throw new Error('Choose a statement PDF.');
+      const skip = $('#statement-nosync')?.checked;
+      const upload = new FormData();
+      upload.append('file', file);
+      upload.append('member', f.get('member') || '');
+      upload.append('sync_after', skip ? 'false' : 'true');
+      const res = await send('/api/statement', { form: upload });
+      statementForm.reset();
+
+      const who = SETUP.members.find((m) => m.id === res.member);
+      const state = res.new ? 'holdings set to' : 'already matched';
+      let msg = `${esc(who ? who.name : res.member)}: ${state} ${res.positions}`
+        + ` positions as of ${esc(res.as_of)}.`;
+      if (res.sync_started) {
+        const job = $('#job');
+        job.hidden = false; job.className = 'job'; job.textContent = 'Reading mail…';
+        poll(job);
+        msg += ` Now reading mail from ${esc(res.as_of)} onwards`
+          + `${res.rewound.length ? ` (${esc(res.rewound.join(', '))})` : ''} — `
+          + 'the numbers update when it finishes.';
+      } else if (!skip) {
+        msg += ' No inbox connected, so nothing was read after it.';
+      }
+      return msg;
+    }, { rerender: false }));
   }
 
   const instrumentsBtn = $('#btn-instruments');

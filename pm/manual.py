@@ -8,6 +8,7 @@ load for a member usually comes from a broker CSV export or a browser fetch.
 from __future__ import annotations
 
 import csv
+import re
 from datetime import date, datetime
 from pathlib import Path
 
@@ -66,6 +67,66 @@ def add_adjustment(
         qty_delta=qty_delta, reason=reason, preserve_cost=preserve_cost,
         source=ev.SRC_MANUAL,
     )
+
+
+def _squash(text: str) -> str:
+    text = re.sub(r"(?i)\b(limited|ltd|the|and|company|co|india|indian)\b", " ", text or "")
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def match_to_holdings(rows: list[dict], known: list[dict]) -> tuple[list[dict], list[str]]:
+    """Give every CSV row an ISIN, so it lands on the position it belongs to.
+
+    Broker exports name the company and leave the ISIN out, but positions are
+    keyed by ISIN — everything else gets renamed sooner or later. Without this the
+    snapshot would key on the name instead, which does not merely lose the link:
+    it creates a *second* position for a company already held, and the holding it
+    failed to recognise looks like one the statement omitted.
+
+    NSE's list settles most of it. `known` — what the member already holds —
+    settles the rest, and is the only thing that can: a recently listed or
+    unlisted security is in nobody's master list but is sitting in the portfolio
+    under a name a person would recognise.
+    """
+    from . import instruments
+
+    by_name = {_squash(k.get("name", "")): k for k in known if k.get("isin")}
+    by_symbol = {_squash(k.get("symbol", "")): k for k in known if k.get("isin")}
+
+    matched_master = matched_held = 0
+    unmatched: list[str] = []
+    for row in rows:
+        if row.get("isin"):
+            continue
+        found = instruments.isin_for(row.get("name", ""), row.get("symbol", ""))
+        if found:
+            row["isin"] = found
+            matched_master += 1
+            continue
+        key = _squash(row.get("name", "")) or _squash(row.get("symbol", ""))
+        hit = by_name.get(key) or by_symbol.get(key)
+        if not hit and len(key) >= 6:
+            hit = next((k for name, k in by_name.items()
+                        if name and (name.startswith(key) or key.startswith(name))), None)
+        if hit:
+            row["isin"] = hit["isin"]
+            row["symbol"] = hit.get("symbol") or row["symbol"]
+            matched_held += 1
+        else:
+            unmatched.append(row.get("name") or row.get("symbol", "?"))
+
+    notes = []
+    if matched_master:
+        notes.append(f"matched {matched_master} row(s) to an ISIN via NSE's list")
+    if matched_held:
+        notes.append(f"matched {matched_held} row(s) to a position already held")
+    if unmatched:
+        notes.append(
+            f"no ISIN for {len(unmatched)}: {', '.join(unmatched[:6])}"
+            + (f" (+{len(unmatched) - 6} more)" if len(unmatched) > 6 else "")
+            + " — recorded under their names, so check they aren't duplicates of "
+              "something already held")
+    return rows, notes
 
 
 def _column(header: list[str], keys: tuple[str, ...]) -> int | None:

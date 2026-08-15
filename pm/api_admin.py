@@ -475,7 +475,12 @@ def test_mailbox():
 
 @router.post("/members/{member_id}/holdings")
 async def upload_holdings(member_id: str, file: UploadFile = File(...), as_of: str = Form("")):
-    """Bootstrap a member's cost basis from a broker CSV export."""
+    """Set a member's holdings — and their cost basis — from a broker CSV export.
+
+    The one thing mail can never supply. Depository statements carry quantity but
+    never what was paid, so for any position bought before the mailbox history
+    begins there is no document that states its cost. A broker's own export does.
+    """
     cfg = cfgmod.load()
     if not cfg.member(member_id):
         raise HTTPException(404, "no such member")
@@ -505,6 +510,13 @@ async def upload_holdings(member_id: str, file: UploadFile = File(...), as_of: s
         except ValueError:
             raise HTTPException(422, "date should look like 2026-08-10")
 
+    # Land each row on the position it belongs to before recording anything.
+    from .replay import replay
+
+    held = replay()["holdings"].get(member_id, [])
+    rows, match_notes = manual.match_to_holdings(rows, held)
+    notes += match_notes
+
     snapshot = manual.set_holdings(
         member=member_id, rows=rows, when=when,
         source=ev.SRC_CSV, doc=file.filename or "upload.csv",
@@ -516,12 +528,16 @@ async def upload_holdings(member_id: str, file: UploadFile = File(...), as_of: s
         instruments.resolve(registry, isin=row.get("isin"), symbol=row["symbol"],
                             name=row.get("name", ""))
     instruments.save_registry(registry)
-    buildmod.build()
+    payload = buildmod.build()
 
+    after = next((m for m in payload["members"] if m["id"] == member_id), {})
     return {
         "positions": len(rows),
         "with_cost": sum(1 for r in rows if r.get("avg")),
+        "unmatched": sum(1 for r in rows if not r.get("isin")),
         "new": bool(written),
+        "invested": after.get("invested"),
+        "cost_unknown": sum(1 for h in after.get("holdings", []) if not h.get("cost_known")),
         "notes": notes,
         "setup": _state(),
     }
