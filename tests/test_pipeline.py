@@ -290,12 +290,302 @@ def real_document_layouts() -> None:
           result.rows and result.rows[0]["qty"] == 3800.0,
           f"got {[(r['symbol'], r['qty']) for r in result.rows]}")
 
+    # The other CDSL layout Dhan sends states no total at all, so the position is
+    # the sum of the parts. Reading "Free Bal" alone under-reports every pledged
+    # holding — and drops a fully-pledged one outright, since its free balance is
+    # 0 and a zero quantity looks like a closed position.
+    no_total_tables = [[
+        ["Sr.", "ISIN Code", "Company Name", "Free Bal", "Pldg Bal",
+         "Demat", "Remat", "Lockin", "Rate", "Value"],
+        ["19", "INE900Z01010", "PARTLY PLEDGED LTD-EQ", "800.00", "3000.000", "", "", "",
+         "298.55", "1134490.00"],
+        ["20", "INE901Z01018", "FULLY PLEDGED LTD-EQ", "0.00", "1250.000", "", "", "",
+         "260.25", "325312.50"],
+    ]]
+    result = holdings.parse("Holdings as on 30-04-2026", no_total_tables, _date(2026, 5, 1),
+                            layout="holdings-balance-table")
+    got = {r["symbol"]: r["qty"] for r in result.rows}
+    check("with no total column, free + pledged are summed",
+          got.get("PARTLYPLEDGEDEQ") == 3800.0, f"got {got}")
+    check("a fully-pledged holding is not dropped as a zero balance",
+          got.get("FULLYPLEDGEDEQ") == 1250.0, f"got {got}")
+
+    # A holdings table that runs past the bottom of a page is extracted as one
+    # table per page, each repeating the header. Reading only the biggest page
+    # turns every position on the others into a phantom sale.
+    page_header = ["Sr", "ISIN Code", "Company Name", "Free Bal", "Pldg Bal", "Earmark",
+                   "Demat", "Remat", "Lock In", "Tot Qty", "Rate", "Value"]
+
+    def _page(rows):
+        return [page_header] + [
+            [str(sr), isin, name, str(qty), "0", "0.0", "0", "0", "0", str(qty),
+             "100.00", str(qty * 100)]
+            for sr, isin, name, qty in rows
+        ]
+
+    paged = [
+        _page([(1, "INE900Z01010", "PAGE ONE LTD-EQ", 800)]),
+        _page([(2, "INE901Z01018", "PAGE TWO LTD-EQ", 640),
+               (3, "INE902Z01016", "PAGE TWO OTHER-2/-", 120)]),
+        _page([(4, "INE903Z01014", "PAGE THREE LTD-EQ1", 55)]),
+    ]
+    result = holdings.parse("Holdings as on 30-06-2026", paged, _date(2026, 7, 1),
+                            layout="holdings-balance-table")
+    got = {r["symbol"]: r["qty"] for r in result.rows}
+    check("every page of a holdings table is read, not just the biggest",
+          len(result.rows) == 4 and got.get("PAGETWOEQ") == 640.0
+          and got.get("PAGEONEEQ") == 800.0 and got.get("PAGETHREEEQ1") == 55.0,
+          f"got {got}")
+
+    # Merging pages must key off the header, so an unrelated table that happens to
+    # carry the same required columns is still left alone.
+    unrelated = paged[:1] + [[
+        ["ISIN", "Scrip", "Quantity", "Purpose"],
+        ["INE904Z01012", "SOMETHING ELSE", "99", "Collateral"],
+    ]]
+    result = holdings.parse("Holdings as on 30-06-2026", unrelated, _date(2026, 7, 1),
+                            layout="holdings-balance-table")
+    check("a differently-headed table is not merged in as another page",
+          len(result.rows) == 1 and result.rows[0]["qty"] == 800.0,
+          f"got {[(r['symbol'], r['qty']) for r in result.rows]}")
+
+    # A contract note's trade table breaks across pages too, and the continuation
+    # sometimes carries no header at all — the rows just resume. Reading only the
+    # first page loses trades, which is silent: the cost basis simply comes out low.
+    cn_header = ["Order No.", "Order Time", "Trade No.", "Trade Time",
+                 "Security / Contract Description", "Buy(B) / Sell(S)", "Exchange",
+                 "Quantity", "Gross Rate/ Trade Price per Unit(₹)²", "Brokerage per Unit(₹)",
+                 "Net Rate per Unit(₹)", "Closing Rate per Unit (₹)",
+                 "Net Total (Before Levies)(₹)", "Remarks"]
+
+    def _fill(order, trade, qty, price):
+        return [order, "10:00:00", trade, "10:00:01", "PAGED CO-EQ/INE900Z01010", "B", "NSE",
+                str(qty), f"{price:.2f}", "", f"{price:.2f}", "", f"({qty * price:.2f})", ""]
+
+    paged_note = [
+        [cn_header, _fill("A1", "T1", 10, 400.0)],
+        # page two repeats the header — but without the footnote marker on it
+        [[c.replace("²", "") for c in cn_header], _fill("A2", "T2", 20, 401.0)],
+        # page three drops the header entirely
+        [_fill("A3", "T3", 30, 402.0)],
+    ]
+    result = contract_note.parse("CONTRACT NOTE\nTrade Date 13-07-2026", paged_note,
+                                 _date(2026, 7, 13), layout="buy-sell-column")
+    by_trade = {r["trade_no"]: r for r in result.rows}
+    check("a trade table repeating its header on the next page is read whole",
+          "T2" in by_trade and by_trade["T2"]["qty"] == 20, f"got {sorted(by_trade)}")
+    check("a footnote marker on the first page's header doesn't split the table",
+          len(result.rows) >= 2, f"got {[r['trade_no'] for r in result.rows]}")
+    check("a continuation page with no header at all is still read",
+          "T3" in by_trade and by_trade["T3"]["qty"] == 30, f"got {sorted(by_trade)}")
+
+    # ...but only when it really is a continuation. An unrelated block of the same
+    # width must not be swept in as trades.
+    unrelated_note = paged_note[:1] + [[
+        ["Charges", "0.00", "GST", "0.00", "Stamp", "0.00", "SEBI", "0.00",
+         "", "", "", "", "", ""]]]
+    result = contract_note.parse("CONTRACT NOTE\nTrade Date 13-07-2026", unrelated_note,
+                                 _date(2026, 7, 13), layout="buy-sell-column")
+    check("a same-width block that isn't trades is left alone",
+          len(result.rows) == 1, f"got {[(r['trade_no'], r['qty']) for r in result.rows]}")
+
     check("settlement/payout advice is not mistaken for a holdings snapshot",
           holdings.looks_like_holdings("Statement of Accounts of Securities", "ROS_123", ros_text)
           is False)
     check("funds ledger still ignored",
           holdings.looks_like_holdings("Report: Statement of Accounts of Funds", "x",
                                        "STATEMENT OF ACCOUNTS OF FUNDS\nPurchase of securities") is False)
+
+
+def uploaded_statement_sets_holdings_and_rewinds() -> None:
+    """Handing a statement over directly must do what finding one in mail does.
+
+    The recovery path when a month never arrives: the document sets the position
+    on its own date, and the mail cursor rewinds to that date so the next sync
+    reads every contract note since and applies it on top.
+    """
+    from pm.config import Mailbox
+
+    print("\n\033[1mStatement upload\033[0m")
+
+    cfg = cfgmod.load()
+    priya = cfg.member("priya")
+    priya.mailbox = Mailbox(user="priya@example.com", password="secret")
+    cfg.save()
+    cfg = cfgmod.load()
+
+    stmt = encrypt(make_pdf(HOLDING_STATEMENT), PRIYA_PAN)
+    result = ingest.ingest_statement(cfg, stmt, filename="aug.pdf")
+    check("owner identified from the statement password alone",
+          result.get("ok") and result["member"] == "priya",
+          f"got {result}")
+    check("as-of date read from the document, not from today",
+          result["as_of"] == "2026-08-31", f"got {result.get('as_of')}")
+    check("every position recorded", result["positions"] == 3, f"got {result.get('positions')}")
+
+    key = "priya@example.com@imap.gmail.com/INBOX"
+    check("the member's inbox was rewound to the statement date",
+          ingest.last_fetch_for(key).date() == date(2026, 8, 31),
+          f"got {ingest.last_fetch_for(key)}")
+    state = ingest.load_sync_state()["mailboxes"][key]
+    check("the resume-by-UID cursor was cleared, so the rewind takes effect",
+          state.get("last_uid") is None, f"got {state.get('last_uid')}")
+
+    # Uploading the same file twice is the same document, not a second snapshot.
+    again = ingest.ingest_statement(cfg, stmt, filename="aug.pdf")
+    check("re-uploading the same statement is recognised, not duplicated",
+          again.get("ok") and again["duplicate"] and not again["new"], f"got {again}")
+
+    # Archived under the upload marker, so a re-parse keeps it even though it has
+    # no broker sender to match on.
+    from pm.mailbox import load_archived
+    archived = [m for m, _ in load_archived(["noreply@groww.in"]) if m.get("upload")]
+    check("an uploaded statement survives the archive's sender filter",
+          len(archived) == 1, f"got {len(archived)} upload(s) in the archive")
+
+    # Wrong document type must be refused rather than read as a snapshot, since a
+    # snapshot supersedes the log.
+    note = encrypt(make_pdf(CONTRACT_NOTE), RAVI_PAN)
+    refused = ingest.ingest_statement(cfg, note, filename="note.pdf")
+    check("a contract note is refused, not mistaken for a holdings statement",
+          not refused.get("ok") and "holdings statement" in refused.get("detail", ""),
+          f"got {refused}")
+
+    # Naming the wrong person must fail rather than attribute the portfolio to them.
+    misattributed = ingest.ingest_statement(cfg, stmt, filename="aug.pdf", member_id="ravi")
+    check("a statement is never attributed to a member whose password it isn't",
+          not misattributed.get("ok"), f"got {misattributed}")
+
+    check("recording without a sync leaves the cursor alone",
+          ingest.ingest_statement(cfg, stmt, filename="aug.pdf", rewind=False)["rewound"] == [],
+          "cursor was rewound despite rewind=False")
+
+
+def csv_rows_land_on_the_right_positions() -> None:
+    """A broker export names companies; positions are keyed by ISIN.
+
+    Without resolving one to the other, uploading an export does not merely fail
+    to update the holdings — it creates a second position for every company
+    already held, and the originals look like holdings the export omitted.
+    """
+    print("\n\033[1mCSV holdings sync\033[0m")
+
+    held = [
+        {"isin": "INE900Z01010", "symbol": "ORBITAL", "name": "Orbital Realty Limited"},
+        {"isin": "INE901Z01018", "symbol": "ORBITEL", "name": "Orbitel Infra Solutions"},
+    ]
+    rows = [
+        {"isin": None, "symbol": "ORBITAL REALTY", "name": "Orbital Realty", "qty": 100, "avg": 400.0},
+        {"isin": None, "symbol": "ORBITEL INFRA SOLUTIONS", "name": "Orbitel Infra Solutions",
+         "qty": 50, "avg": 33.0},
+        {"isin": None, "symbol": "MYSTERY CORP", "name": "Mystery Corp", "qty": 5, "avg": 10.0},
+    ]
+    out, notes = manual.match_to_holdings([dict(r) for r in rows], held)
+    by_name = {r["name"]: r for r in out}
+
+    check("a company already held is matched to its ISIN, not duplicated",
+          by_name["Orbital Realty"]["isin"] == "INE900Z01010",
+          f"got {by_name['Orbital Realty']['isin']}")
+    check("an unlisted holding is matched from the portfolio, not NSE's list",
+          by_name["Orbitel Infra Solutions"]["isin"] == "INE901Z01018",
+          f"got {by_name['Orbitel Infra Solutions']['isin']}")
+    check("two similarly-named companies are not confused for each other",
+          by_name["Orbital Realty"]["isin"] != by_name["Orbitel Infra Solutions"]["isin"])
+    check("a row that matches nothing is reported rather than silently guessed",
+          by_name["Mystery Corp"]["isin"] is None
+          and any("Mystery Corp" in n for n in notes), f"notes: {notes}")
+
+    # Re-uploading the same export must update in place, not accumulate.
+    again, _ = manual.match_to_holdings([dict(r) for r in rows], held)
+    check("re-running the match is stable",
+          [r["isin"] for r in again] == [r["isin"] for r in out],
+          f"{[r['isin'] for r in again]} vs {[r['isin'] for r in out]}")
+
+
+def incomplete_statements_do_not_erase_positions() -> None:
+    """A snapshot that could not be read whole must not retire the rest of a book.
+
+    A snapshot supersedes the log, so a parser that loses a page produces a
+    document indistinguishable from a liquidation: every position it failed to read
+    gets its quantity *and* its cost basis zeroed. If a later statement lists the
+    holding again there is no average left to price it with, so it comes back
+    showing shares worth lakhs against zero invested — which is exactly what a
+    dropped page did to this portfolio before these two guards existed.
+    """
+    from datetime import datetime as _datetime
+
+    from pm.events import IST
+
+    print("\n\033[1mIncomplete statements\033[0m")
+
+    def snapshot(day: int, symbols: dict[str, float]) -> dict:
+        return ev.make_snapshot(
+            member="asha",
+            ts=_datetime(2026, day, 28, 23, 59, tzinfo=IST),
+            holdings=[{"isin": f"INE{code:09d}", "symbol": sym, "name": sym, "qty": qty}
+                      for sym, (code, qty) in symbols.items()],
+            source=ev.SRC_HOLDINGS_STATEMENT, has_cost=False,
+        )
+
+    def trade(month: int, sym: str, code: int, qty: float, price: float,
+              day: int = 10) -> dict:
+        return ev.make_trade(
+            member="asha", ts=_datetime(2026, month, day, 15, 30, tzinfo=IST), side="buy",
+            isin=f"INE{code:09d}", symbol=sym, qty=qty, price=price,
+            source=ev.SRC_CONTRACT_NOTE,
+        )
+
+    book = {"AAA": (1, 100.0), "BBB": (2, 200.0), "CCC": (3, 300.0),
+            "DDD": (4, 400.0), "EEE": (5, 500.0), "FFF": (6, 600.0)}
+    buys = [trade(1, sym, code, qty, 50.0) for sym, (code, qty) in book.items()]
+
+    # A statement that lost a page: one position of six, where the other five were
+    # bought and never sold.
+    partial = replay(buys + [snapshot(2, {"AAA": book["AAA"]})])
+    held = {p["symbol"]: p for p in partial["holdings"]["asha"]}
+    check("an incomplete statement does not retire the positions it omits",
+          len(held) == 6, f"got {sorted(held)}")
+    check("the omitted positions keep their cost basis",
+          held.get("FFF", {}).get("cost") == 600.0 * 50.0,
+          f"got {held.get('FFF', {}).get('cost')}")
+    check("reading a statement as incomplete is reported, not silent",
+          any(w["kind"] == "partial_snapshot" for w in partial["warnings"]),
+          f"warnings: {[w['kind'] for w in partial['warnings']]}")
+
+    # Bought on the statement's own date: T+1 settlement means the shares are not
+    # in the demat account yet, so the statement omitting them is not a sale.
+    # The trade and the statement share a calendar date: 28 March, 15:30 then 23:59.
+    same_day = replay(buys + [
+        snapshot(2, book),
+        trade(3, "GGG", 7, 50.0, 20.0, day=28),
+        snapshot(3, book),
+    ])
+    held = {p["symbol"]: p for p in same_day["holdings"]["asha"]}
+    check("a purchase made on the statement's own date is not retired by it",
+          held.get("GGG", {}).get("qty") == 50.0, f"got {held.get('GGG')}")
+    check("and it keeps the cost it was bought at",
+          held.get("GGG", {}).get("cost") == 50.0 * 20.0,
+          f"got {held.get('GGG', {}).get('cost')}")
+
+    # A real sale still gets through: below the threshold, an omission means sold.
+    sold = replay(buys + [snapshot(2, {k: v for k, v in book.items() if k != "FFF"})])
+    held = {p["symbol"]: p for p in sold["holdings"]["asha"]}
+    check("a plausible number of omissions is still read as a sale",
+          "FFF" not in held and len(held) == 5, f"got {sorted(held)}")
+
+    # And when a position genuinely does go missing and come back, the average it
+    # was retired at is what prices it — not zero.
+    round_trip = replay(buys + [
+        snapshot(2, {k: v for k, v in book.items() if k != "FFF"}),
+        snapshot(3, book),
+    ])
+    held = {p["symbol"]: p for p in round_trip["holdings"]["asha"]}
+    check("a position that reappears is priced at what it cost before",
+          held.get("FFF", {}).get("cost") == 600.0 * 50.0,
+          f"got {held.get('FFF', {}).get('cost')}")
+    check("a reappearing position is not reported as cost-unknown",
+          held.get("FFF", {}).get("cost_known") is True,
+          f"got {held.get('FFF', {}).get('cost_known')}")
 
 
 def broker_profiles_are_wired() -> None:
@@ -446,6 +736,9 @@ def main() -> int:
     check("the discrepancy was surfaced, not silently applied", bool(drift),
           f"warnings: {state['warnings']}")
 
+    uploaded_statement_sets_holdings_and_rewinds()
+    csv_rows_land_on_the_right_positions()
+    incomplete_statements_do_not_erase_positions()
     real_document_layouts()
     broker_profiles_are_wired()
 

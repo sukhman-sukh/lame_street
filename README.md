@@ -90,14 +90,25 @@ Two fields matter more than they look:
 
 Press **Test all inboxes** to confirm each connects.
 
-### 2. Upload starting holdings — once per person
+### 2. Sync holdings from a CSV — per person
 
 The one thing email cannot give you. Broker and depository statements state what
-you own but never what you paid, so the opening cost basis has to come from the
-broker once. In Groww: **Reports → Holdings → download**, then upload the CSV.
-Column names are matched loosely, so most brokers' exports work as-is.
+you own but never what you paid, so cost basis has to come from the broker.
+In Groww: **Reports → Holdings → download**. Zerodha: **Console → Portfolio →
+Holdings → download**. Dhan: **Portfolio → Holdings → export**. Then upload the
+CSV in the Setup tab. Column names are matched loosely, so most brokers' exports
+work as-is.
 
-After this, contract notes keep cost current on their own.
+Contract notes keep cost current for everything bought since the mailbox history
+begins. For anything bought *before* it, no document you have states the price —
+so re-upload an export whenever P&L looks wrong. It is not a one-time step.
+
+Rows are matched to existing positions by ISIN, resolved from the company name
+through NSE's list and through what that person already holds. That second
+lookup is what catches recently listed or unlisted securities that appear in no
+master list. Without the matching, an upload would key on the name and create a
+*second* position for every company already held; anything still unmatched is
+reported rather than guessed at.
 
 ### 3. Refresh the NSE list
 
@@ -245,7 +256,36 @@ Three rules, each earned from a real misparse:
 
 Quantity column preference is explicit: total before free balance. `Free Bal`
 excludes pledged shares, so reading the first balance-shaped column silently
-under-reports anyone using margin.
+under-reports anyone using margin — and drops a *fully* pledged holding
+altogether, since its free balance reads `0.00` and a zero quantity looks like a
+closed position. Where a layout states no total at all (one of the two CDSL
+formats Dhan sends), the position is the sum of the parts: free + pledged +
+earmarked + demat + remat + lock-in.
+
+### Tables that span pages
+
+Both parsers gather every page of a table, because extraction returns one table
+per page and reading only the first is silent: on a contract note it loses
+trades, and on a holdings statement it retires positions that were never sold.
+
+Continuation pages arrive in two shapes. Most repeat the header, which is matched
+on — an unrelated table with the same columns has a different header and is left
+alone. Some repeat nothing at all and the rows simply resume; those are admitted
+only when *every* row on them is recognisable as a row of that table, since there
+is no header to match on and guessing would be worse than missing them.
+
+Header matching ignores whitespace and footnote markers. A statement prints
+`Gross Rate/ Trade Price per Unit(₹)²` on page one and `…per Unit(₹)` on page
+two, and `(before levies)(₹)` against `(before levies) (₹)` — either difference
+is otherwise enough to make the continuation look like a different table.
+
+### One broker, two formats
+
+A broker may change its layout and keep both in your archive. Zerodha's contract
+notes are ruled one row per fill with a `Buy(B)/Sell(S)` column up to mid-2025,
+and as SEBI per-ISIN net-obligation blocks after. Profiles therefore declare an
+ordered *list* of layouts, tried in order, so old and new documents both read
+without either being guessed at.
 
 ---
 
@@ -276,15 +316,49 @@ unredacted version; don't share that one.
 Once a parser improves:
 
 ```bash
-.venv/bin/python -m pm reparse            # read anything not yet read
-.venv/bin/python -m pm reparse --all      # re-read everything
-.venv/bin/python -m pm reparse --rebuild  # also retire earlier interpretations
+.venv/bin/python -m pm reparse              # read anything not yet read
+.venv/bin/python -m pm reparse --all        # re-read everything
+.venv/bin/python -m pm reparse --snapshots  # re-derive holdings snapshots only
+.venv/bin/python -m pm reparse --rebuild    # also retire earlier interpretations
 ```
 
-`--rebuild` parses first and only retires the old log if the result holds up, so a
-re-parse that can read nothing (a missing password, say) leaves your data intact.
-Retired shards move to `data/events/superseded-<timestamp>/` rather than being
-deleted.
+Both rebuild modes parse first and only retire the old log if the result holds up,
+so a re-parse that can read nothing (a missing password, say) leaves your data
+intact. Retired shards move to `data/events/superseded-<timestamp>/` rather than
+being deleted.
+
+Prefer `--snapshots` after a fix to the holdings parser. A misread snapshot has to
+be retired because it supersedes the log, but trades are the part nothing else can
+reconstruct — and a full `--rebuild` would retire every contract note the parsers
+cannot read today along with it.
+
+---
+
+## Resetting holdings from a statement
+
+When a month's statement never arrives — or the numbers have drifted and you want
+them set against the depository rather than inferred — hand the statement over
+directly:
+
+```bash
+.venv/bin/python -m pm statement ~/Downloads/holding-statement-jun.pdf
+```
+
+Quantities become exactly what the document says on **its own** date, the mail
+cursor rewinds to that date, and every contract note since is read and applied on
+top. Encrypted statements need no extra argument: the password that opens the file
+is what identifies the owner, the same rule the mail path uses. Add `--member` to
+restrict it to one person, or `--no-sync` to record the statement and leave the
+mail cursor where it is.
+
+The same thing lives in the Setup tab under **Sync from a statement**, and the
+uploaded file is archived under `data/raw/` like any other document, so a later
+re-parse keeps it.
+
+Uploading the same statement twice is recognised as the same document rather than
+recorded again, and anything that isn't a holdings statement is refused — reading a
+contract note or a margin report as a snapshot would zero every position it
+doesn't happen to mention.
 
 ---
 
@@ -316,7 +390,8 @@ member          add / list / remove people
 mailbox         set / test an inbox connection
 secrets         check / adopt / export credentials
 sync            read new mail, log trades, rebuild      (--full for all history)
-reparse         re-run parsers over archived mail        (--all, --rebuild)
+statement       set holdings from a statement PDF, then sync the mail after it
+reparse         re-run parsers over archived mail  (--all, --rebuild, --snapshots)
 refresh         prices + rebuild
 prices          prices only
 build           rebuild dashboard.json from the log
