@@ -543,7 +543,7 @@ def cmd_secrets(args) -> int:
 def cmd_serve(args) -> int:
     from .server import run
 
-    run(host=args.host, port=args.port)
+    run(host=args.host, port=args.port, reload=getattr(args, 'reload', False))
     return 0
 
 
@@ -657,6 +657,9 @@ def build_parser() -> argparse.ArgumentParser:
     sv = sub.add_parser("serve", help="run the dashboard locally")
     sv.add_argument("--host", default=default_host)
     sv.add_argument("--port", type=int, default=default_port)
+    sv.add_argument("--reload", action="store_true",
+                    help="restart when Python under pm/ changes (development; "
+                         "turns off scheduled syncs)")
     sv.set_defaults(fn=cmd_serve)
     return p
 

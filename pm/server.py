@@ -18,6 +18,7 @@ import os
 import threading
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
@@ -50,6 +51,13 @@ MAX_UPLOAD = 5 * 1024 * 1024
 
 app = FastAPI(title="LameStreet", docs_url=None, redoc_url=None)
 app.include_router(admin_router)
+
+# Mounted here rather than inside run(), so that importing `pm.server:app` yields a
+# complete app. The reloader — and any external ASGI server — imports the module in
+# a worker process and never calls run(), so anything wired up only there is simply
+# missing: with this mount inside run(), a reloading server served no assets at all.
+if (paths.VIEWER / "assets").exists():
+    app.mount("/assets", StaticFiles(directory=paths.VIEWER / "assets"), name="assets")
 
 
 # ------------------------------------------------------------------ auth gate
@@ -355,7 +363,17 @@ def _start_scheduler() -> None:
     threading.Thread(target=beat, daemon=True, name="pm-scheduler").start()
 
 
-def run(host: str = "127.0.0.1", port: int = 3002) -> None:
+def run(host: str = "127.0.0.1", port: int = 3002, reload: bool = False) -> None:
+    """Serve the viewer.
+
+    `reload` restarts the workers whenever a Python file under pm/ changes. It is
+    for development only: it costs a file watcher, and the scheduler is left off
+    under it because the supervising process does not serve requests — a timed sync
+    firing there would write to the same data directory as the worker.
+
+    Static assets are always read from disk per request, so the viewer's JS and CSS
+    are live either way; it is only Python that a running server holds in memory.
+    """
     import uvicorn
 
     if backup.enabled():
@@ -378,10 +396,8 @@ def run(host: str = "127.0.0.1", port: int = 3002) -> None:
                 log.warning("could not rebuild dashboard after restore: %s", exc)
 
     paths.ensure_dirs()
-    if (paths.VIEWER / "assets").exists():
-        app.mount("/assets", StaticFiles(directory=paths.VIEWER / "assets"), name="assets")
-
-    _start_scheduler()
+    if not reload:
+        _start_scheduler()
     if host not in ("127.0.0.1", "localhost", "::1") and not auth.enabled():
         raise SystemExit(
             f"refusing to bind {host}: that exposes the dashboard, the admin API and "
@@ -397,5 +413,15 @@ def run(host: str = "127.0.0.1", port: int = 3002) -> None:
     if not auth.enabled():
         print("  · no login configured (PM_AUTH_USER / PM_AUTH_PASSWORD unset) — "
               "fine on 127.0.0.1")
+    if reload:
+        print("  · reloading on changes under pm/ — scheduled syncs are off")
     print()
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+
+    if reload:
+        # The reloader runs the app in a worker it starts itself, so it needs an
+        # import string; handed the app object it can only warn and carry on
+        # without reloading, which looks like it worked.
+        uvicorn.run("pm.server:app", host=host, port=port, log_level="warning",
+                    reload=True, reload_dirs=[str(Path(__file__).resolve().parent)])
+    else:
+        uvicorn.run(app, host=host, port=port, log_level="warning")

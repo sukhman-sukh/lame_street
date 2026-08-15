@@ -406,6 +406,7 @@ mailbox. Re-export to update.
 
 ```
 serve           run the dashboard — everything below is also in its Setup tab
+                (--reload restarts on Python changes while developing)
 init            create config and data folders
 member          add / list / remove people
 mailbox         set / test an inbox connection
