@@ -53,6 +53,102 @@ const pctBadge = (v) => {
   return `<span class="delta ${dir}"><i class="bi ${icon}"></i>${v > 0 ? '+' : ''}${v.toFixed(2)}%</span>`;
 };
 
+/* What a double-click can change, and what changing it means. The note is shown
+ * in the editor, because "invested" and "avg cost" are the same fact twice and
+ * whichever one is typed decides how the other is derived. */
+const EDIT_FIELDS = {
+  price: { label: 'Price', note: 'used instead of the fetched price, for everyone holding it' },
+  name: { label: 'Name', note: 'the company name shown everywhere' },
+  qty: { label: 'Quantity', note: 'shares held — the average is kept, so invested moves with it' },
+  avg: { label: 'Avg cost', note: 'paid per share — invested becomes quantity × this' },
+  cost: { label: 'Invested', note: 'total money in — the average is recomputed from it' },
+};
+
+/* Markdown → HTML, deliberately small: headings, emphasis, inline and fenced
+ * code, links, flat lists, quotes and rules — the vocabulary a thesis is
+ * actually written in. Everything is escaped before any markup is added, so a
+ * note can never inject HTML, and only http(s)/mailto links are emitted.
+ *
+ * Line breaks inside a paragraph are kept rather than collapsed: this is prose
+ * typed into a textarea, and someone who pressed Enter meant it. */
+function mdToHtml(src) {
+  const inline = (s) => esc(s)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[\s(])[*_]([^*_\n]+)[*_](?=[\s.,;:!?)]|$)/g, '$1<em>$2</em>')
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+|mailto:[^\s)]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+
+  const out = [];
+  let para = [];
+  let quote = [];
+  let list = null;
+  let fence = null;
+
+  const flushPara = () => {
+    if (para.length) out.push(`<p>${para.map(inline).join('<br>')}</p>`);
+    para = [];
+  };
+  const flushQuote = () => {
+    if (quote.length) out.push(`<blockquote>${quote.map(inline).join('<br>')}</blockquote>`);
+    quote = [];
+  };
+  const flushList = () => {
+    if (list) {
+      out.push(`<${list.tag}>${list.items.map((i) => `<li>${inline(i)}</li>`).join('')}</${list.tag}>`);
+    }
+    list = null;
+  };
+  const flushAll = () => { flushPara(); flushQuote(); flushList(); };
+  const openList = (tag, item) => {
+    flushPara(); flushQuote();
+    if (!list || list.tag !== tag) { flushList(); list = { tag, items: [] }; }
+    list.items.push(item);
+  };
+
+  for (const raw of String(src || '').replace(/\r\n?/g, '\n').split('\n')) {
+    const line = raw.replace(/\s+$/, '');
+    if (fence !== null) {
+      if (/^\s*```/.test(line)) { out.push(`<pre><code>${esc(fence.join('\n'))}</code></pre>`); fence = null; }
+      else fence.push(raw);
+      continue;
+    }
+    if (/^\s*```/.test(line)) { flushAll(); fence = []; continue; }
+    if (!line.trim()) { flushAll(); continue; }
+
+    let m = line.match(/^(#{1,6})\s+(.*)$/);
+    if (m) {
+      flushAll();
+      // A note's "#" is a section inside the page, not the page's own title.
+      const level = Math.min(6, m[1].length + 2);
+      out.push(`<h${level}>${inline(m[2])}</h${level}>`);
+    } else if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) {
+      flushAll();
+      out.push('<hr>');
+    } else if ((m = line.match(/^\s*[-*+]\s+(.*)$/))) {
+      openList('ul', m[1]);
+    } else if ((m = line.match(/^\s*\d+[.)]\s+(.*)$/))) {
+      openList('ol', m[1]);
+    } else if ((m = line.match(/^\s*>\s?(.*)$/))) {
+      flushPara(); flushList();
+      quote.push(m[1]);
+    } else if (list && /^\s+\S/.test(raw)) {
+      list.items[list.items.length - 1] += ` ${line.trim()}`;
+    } else {
+      flushList(); flushQuote();
+      para.push(line);
+    }
+  }
+  if (fence !== null) out.push(`<pre><code>${esc(fence.join('\n'))}</code></pre>`);
+  flushAll();
+  return out.join('\n');
+}
+
+/* One company's own page is a tab like any other, addressed as stock:<key>. */
+const openStock = () => (active.startsWith('stock:') ? active.slice(6) : null);
+const findStock = (key) =>
+  (DATA?.consolidated || []).find((r) => r.key === key) || null;
+
 function ago(iso) {
   if (!iso) return 'never';
   const then = new Date(iso);
@@ -178,14 +274,43 @@ function renderStamps() {
   const a = DATA.as_of || {};
   const holdings = (DATA.members || [])
     .map((m) => m.holdings_as_of).filter(Boolean).sort().pop();
-  $('#stamps').innerHTML = [
+  const manual = DATA.manual || {};
+  const stamps = [
     `<span><b>Prices</b> ${ago(a.prices)}${a.prices_stale ? ' <span class="chip plain">stale</span>' : ''}</span>`,
     `<span><b>Holdings</b> ${ago(holdings)}</span>`,
     `<span><b>Mail synced</b> ${ago(a.last_mail_sync)}</span>`,
-  ].join('');
+  ];
+  // Numbers someone typed are not numbers a document supplied. Say how many are
+  // in force, so they are never mistaken for each other.
+  if (manual.values || manual.notes) {
+    stamps.push('<span><b>By hand</b> '
+      + [manual.values ? `${manual.values} value${manual.values === 1 ? '' : 's'}` : '',
+        manual.notes ? `${manual.notes} note${manual.notes === 1 ? '' : 's'}` : '']
+        .filter(Boolean).join(' · ')
+      + '</span>');
+  }
+  $('#stamps').innerHTML = stamps.join('');
+}
+
+/* The row of cards at the top. Same shape whatever is being described. */
+function statsRow(cards) {
+  return `<section class="stats">${cards.map((c) => `
+    <div class="card stat">
+      <div class="card-body">
+        <span class="stat-icon ${c.tint}"><i class="bi ${c.icon}"></i></span>
+        <div class="stat-body">
+          <span class="stat-label">${c.label}</span>
+          <span class="stat-value">${c.value}</span>
+          ${c.sub || ''}
+        </div>
+      </div>
+    </div>`).join('')}</section>`;
 }
 
 function renderStats() {
+  const stock = openStock();
+  if (stock) return renderStockStats(findStock(stock));
+
   // Scoped to whoever is selected. The same four numbers answer the same question
   // for one person as for the family, so it is the same row of cards either way —
   // only the source changes.
@@ -213,24 +338,40 @@ function renderStats() {
     { icon: 'bi-lightning-charge', tint: 't4', label: 'Today', value: signed(t.day_change),
       sub: pctBadge(t.day_change_pct) },
   ];
-  return `<section class="stats">${cards.map((c) => `
-    <div class="card stat">
-      <div class="card-body">
-        <span class="stat-icon ${c.tint}"><i class="bi ${c.icon}"></i></span>
-        <div class="stat-body">
-          <span class="stat-label">${c.label}</span>
-          <span class="stat-value">${c.value}</span>
-          ${c.sub}
-        </div>
-      </div>
-    </div>`).join('')}</section>`;
+  return statsRow(cards);
+}
+
+/* The same four cards, asking the same questions of one company. */
+function renderStockStats(r) {
+  if (!r) return '';
+  const holders = r.held_by_count === 1 ? '1 holder' : `${r.held_by_count} holders`;
+  const opened = (r.value || 0) - (r.day_change || 0);
+  const dayPct = r.day_change && opened ? (r.day_change / opened) * 100 : null;
+  return statsRow([
+    { icon: 'bi-hash', tint: 't1', label: 'Shares held', value: qtyFmt.format(r.qty),
+      sub: `<span class="stat-sub">${holders} · avg ${rupees(r.avg)}</span>` },
+    { icon: 'bi-tag', tint: 't2', label: 'Price', value: rupees(r.price),
+      sub: r.manual_price
+        ? '<span class="stat-sub"><i class="bi bi-pencil-fill"></i> set by hand</span>'
+        : pctBadge(dayPct) },
+    { icon: 'bi-cash-stack', tint: 't3', label: 'Value', value: rupees(r.value, false),
+      sub: `<span class="stat-sub">invested ${rupees(r.cost, false)}</span>` },
+    { icon: 'bi-graph-up-arrow', tint: 't4', label: 'P&L', value: signed(r.pnl),
+      sub: pctBadge(r.pnl_pct) },
+  ]);
 }
 
 function renderTabs() {
+  const stock = openStock();
   const tabs = [['overview', '<i class="bi bi-grid-1x2"></i>All Family', '']]
     .concat((DATA?.members || []).map((m) =>
       [m.id, esc(m.name), m.positions ? String(m.positions) : '—']))
     .concat([['activity', '<i class="bi bi-activity"></i>Activity', '']]);
+  // An open company gets its own pill, so the nav still shows where you are.
+  if (stock) {
+    const row = findStock(stock);
+    tabs.push([active, `<i class="bi bi-building"></i>${esc(row ? row.symbol : stock)}`, '']);
+  }
   return `<nav class="tabs card" role="tablist"><div class="nav nav-pills">${tabs.map(([id, label, sub]) => `
     <button class="tab nav-link${active === id ? ' active' : ''}" role="tab"
       data-tab="${esc(id)}" aria-selected="${active === id}">
@@ -242,6 +383,15 @@ function renderPanel() {
   if (active === 'setup') return renderSetup();
   if (active === 'overview') return renderOverview();
   if (active === 'activity') return renderActivity();
+  const stock = openStock();
+  if (stock) {
+    const row = findStock(stock);
+    return row ? renderStock(row) : `
+      <div class="empty">
+        <p>Nothing is held under <code>${esc(stock)}</code> any more.</p>
+        <p><button class="btn btn-ghost" data-goto="overview">Back to all holdings</button></p>
+      </div>`;
+  }
   const member = (DATA.members || []).find((m) => m.id === active);
   return member ? renderMember(member) : '<div class="empty">Nothing here.</div>';
 }
@@ -277,11 +427,50 @@ function renderOverview() {
   ${renderConsolidated()}`;
 }
 
+/* A value on the page that can be typed over.
+ *
+ * Double-click opens a small editor; what it saves is stored by hand and survives
+ * every rebuild, so while one is in force the cell carries a pencil. `on` is the
+ * list of fields already set by hand for this row, straight from the payload. */
+function editable(html, { field, key, member = '', value, on = [] }) {
+  if (!LIVE || !key || !EDIT_FIELDS[field]) return html;
+  const manual = (on || []).includes(field);
+  return `<span class="editable${manual ? ' is-manual' : ''}" tabindex="0" role="button"
+    data-edit="${esc(field)}" data-key="${esc(key)}" data-member="${esc(member)}"
+    data-raw="${value === null || value === undefined ? '' : esc(value)}"
+    title="${manual ? 'Set by hand' : 'Double-click to set'} — ${esc(EDIT_FIELDS[field].note)}"
+    >${html}</span>`;
+}
+
+/* The company's symbol, as a link to its own page. A real href so it is
+ * middle-clickable and the browser's own history does the navigating. */
+const stockLink = (r, html) =>
+  `<a class="stock-link" href="#stock:${encodeURIComponent(r.key || '')}"
+    title="Open ${esc(r.symbol)} — company details and thesis">${html}</a>`;
+
+/* A function, not a constant: LIVE is only known once the first fetch has come
+   back, which is long after this file is parsed. */
+const editHint = () => (LIVE
+  ? '<span class="hint-edit"><i class="bi bi-pencil"></i>Double-click a value to set it by hand</span>'
+  : '');
+
+/* Quantity and average on this table are sums across holders, so there is no one
+ * place to write them back to. Say so on hover rather than let a double-click
+ * land on nothing and read as broken. */
+const aggNote = (r) => (LIVE
+  ? ` class="agg" title="Total across ${r.held_by_count} holder`
+    + `${r.held_by_count === 1 ? '' : 's'} — open ${esc(r.symbol)}'s page, or a person's tab,`
+    + ' to set one holding by hand"'
+  : '');
+
 function renderConsolidated() {
   const rows = (DATA.consolidated || []).map((r, i) => {
     const holders = r.holders.map((h) => `
       <tr><td class="left">${esc(h.member_name)}</td>
-        <td>${qtyFmt.format(h.qty)}</td><td>${rupees(h.avg)}</td>
+        <td>${editable(qtyFmt.format(h.qty),
+          { field: 'qty', key: r.key, member: h.member, value: h.qty, on: h.manual })}</td>
+        <td>${editable(rupees(h.avg),
+          { field: 'avg', key: r.key, member: h.member, value: h.avg, on: h.manual })}</td>
         <td>${rupees(h.value, false)}</td><td>${signed(h.pnl)}</td></tr>`).join('');
 
     const missing = r.not_held_by.length
@@ -291,12 +480,14 @@ function renderConsolidated() {
     return `
     <tr class="clickable" data-row="${i}">
       <td class="left"><span class="caret" data-caret="${i}">▸</span>
-        <span class="sym">${esc(r.symbol)}</span>
+        ${stockLink(r, `<span class="sym">${esc(r.symbol)}</span>`)}
         <span class="chip plain">${r.held_by_count} of ${(DATA.members || []).length}</span>
-        <span class="sub">${esc(r.name || '')}</span></td>
-      <td>${qtyFmt.format(r.qty)}</td>
-      <td>${rupees(r.avg)}</td>
-      <td>${r.priced ? rupees(r.price) : '<span class="muted">no price</span>'}</td>
+        <span class="sub">${editable(esc(r.name || '—'),
+          { field: 'name', key: r.key, value: r.name, on: r.manual })}</span></td>
+      <td${aggNote(r)}>${qtyFmt.format(r.qty)}</td>
+      <td${aggNote(r)}>${rupees(r.avg)}</td>
+      <td>${editable(r.priced ? rupees(r.price) : '<span class="muted">no price</span>',
+        { field: 'price', key: r.key, value: r.price, on: r.manual })}</td>
       <td>${rupees(r.value, false)}</td>
       <td>${signed(r.pnl)} <span class="sub">${pct(r.pnl_pct)}</span></td>
       <td>${signed(r.day_change)}</td>
@@ -306,13 +497,16 @@ function renderConsolidated() {
         <thead><tr><th class="left">Holder</th><th>Qty</th><th>Avg cost</th><th>Value</th><th>P&amp;L</th></tr></thead>
         <tbody>${holders}</tbody>
       </table>${missing}
+      <p class="detail-more">${stockLink(r, 'Open the full page for '
+        + `${esc(r.symbol)} <i class="bi bi-arrow-right-short"></i>`)}</p>
     </div></td></tr>`;
   }).join('');
 
   return `
   <section class="panel card">
     <div class="panel-head"><h2><i class="bi bi-collection"></i>Every stock the family holds</h2>
-      <span class="hint">Expand a row to see who holds it — and who doesn't</span></div>
+      <span class="hint">Click a name for its page · expand a row to see who holds it
+        ${editHint()}</span></div>
     <div class="table-responsive"><table class="table table-hover align-middle">
       <thead><tr><th class="left">Stock</th><th>Total qty</th><th>Avg cost</th><th>Price</th>
         <th>Value</th><th>P&amp;L</th><th>Today</th></tr></thead>
@@ -324,13 +518,18 @@ function renderConsolidated() {
 function renderMember(m) {
   const rows = m.holdings.map((h) => `
     <tr>
-      <td class="left"><span class="sym">${esc(h.symbol)}</span>
+      <td class="left">${stockLink(h, `<span class="sym">${esc(h.symbol)}</span>`)}
         ${h.cost_known ? '' : '<span class="chip plain">cost unknown</span>'}
-        <span class="sub">${esc(h.name || '')}</span></td>
-      <td>${qtyFmt.format(h.qty)}</td>
-      <td>${rupees(h.avg)}</td>
-      <td>${h.priced ? rupees(h.price) : '<span class="muted">no price</span>'}</td>
-      <td>${rupees(h.cost, false)}</td>
+        <span class="sub">${editable(esc(h.name || '—'),
+          { field: 'name', key: h.key, value: h.name, on: h.manual })}</span></td>
+      <td>${editable(qtyFmt.format(h.qty),
+        { field: 'qty', key: h.key, member: m.id, value: h.qty, on: h.manual })}</td>
+      <td>${editable(rupees(h.avg),
+        { field: 'avg', key: h.key, member: m.id, value: h.avg, on: h.manual })}</td>
+      <td>${editable(h.priced ? rupees(h.price) : '<span class="muted">no price</span>',
+        { field: 'price', key: h.key, value: h.price, on: h.manual })}</td>
+      <td>${editable(rupees(h.cost, false),
+        { field: 'cost', key: h.key, member: m.id, value: h.cost, on: h.manual })}</td>
       <td>${rupees(h.value, false)}</td>
       <td>${signed(h.pnl)} <span class="sub">${pct(h.pnl_pct)}</span></td>
       <td>${signed(h.day_change)}</td>
@@ -340,7 +539,7 @@ function renderMember(m) {
   <section class="panel card">
     <div class="panel-head"><h2><i class="bi bi-person-circle"></i>${esc(m.name)}</h2>
       <span class="hint">Holdings ${ago(m.holdings_as_of)}${m.snapshot_source ? ` · from ${esc(m.snapshot_source.replace(/_/g, ' '))}` : ''}
-        · last trade ${ago(m.last_trade)}</span></div>
+        · last trade ${ago(m.last_trade)}${editHint()}</span></div>
     <div class="table-responsive"><table class="table table-hover align-middle">
       <thead><tr><th class="left">Stock</th><th>Qty</th><th>Avg cost</th><th>Price</th>
         <th>Invested</th><th>Value</th><th>P&amp;L</th><th>Today</th></tr></thead>
@@ -349,21 +548,243 @@ function renderMember(m) {
   </section>`;
 }
 
-function renderActivity() {
-  const names = Object.fromEntries((DATA.members || []).map((m) => [m.id, m.name]));
-  const rows = (DATA.activity || []).map((a) => `
-    <div class="feed-row">
-      <span class="when">${esc((a.ts || '').replace('T', ' ').slice(0, 16))}</span>
-      <span class="who">${esc(names[a.member] || a.member)}</span>
-      <span>${esc(a.text)}</span>
-      <span class="src">${esc((a.source || '').replace(/_/g, ' '))}</span>
-    </div>`).join('');
+/* ------------------------------------------------------- one company's page */
+
+function renderStock(r) {
+  const members = (DATA.members || []).length;
+  const facts = [
+    ['ISIN', r.isin ? `<code class="mono">${esc(r.isin)}</code>`
+      : '<span class="muted">none recorded</span>'],
+    ['Trading symbol', `<code class="mono">${esc(r.symbol)}</code>`],
+    ['Price feed', r.yahoo ? `<code class="mono">${esc(r.yahoo)}</code>`
+      : '<span class="flag">not mapped — no price can be fetched</span>'],
+    ['Price', editable(r.priced ? rupees(r.price) : '<span class="muted">no price</span>',
+      { field: 'price', key: r.key, value: r.price, on: r.manual })
+      + (r.manual_price ? '' : ` <span class="sub-inline">${ago((DATA.as_of || {}).prices)}</span>`)],
+    ['Today', signed(r.day_change)],
+    ['Held by', `${r.held_by_count} of ${members} ${members === 1 ? 'person' : 'people'}`],
+    ['First in the log', r.first_seen
+      ? esc(r.first_seen.slice(0, 10)) : '<span class="muted">no trades logged</span>'],
+    ['Logged events', `${r.trade_count} event${r.trade_count === 1 ? '' : 's'}`],
+  ];
+
+  const holders = r.holders.map((h) => `
+    <tr>
+      <td class="left"><span class="sym">${esc(h.member_name)}</span>
+        ${h.cost_known ? '' : '<span class="chip plain">cost unknown</span>'}</td>
+      <td>${editable(qtyFmt.format(h.qty),
+        { field: 'qty', key: r.key, member: h.member, value: h.qty, on: h.manual })}</td>
+      <td>${editable(rupees(h.avg),
+        { field: 'avg', key: r.key, member: h.member, value: h.avg, on: h.manual })}</td>
+      <td>${editable(rupees(h.cost, false),
+        { field: 'cost', key: r.key, member: h.member, value: h.cost, on: h.manual })}</td>
+      <td>${rupees(h.value, false)}</td>
+      <td>${signed(h.pnl)}</td>
+    </tr>`).join('');
+
+  return `
+  <p class="crumb"><a href="#overview"><i class="bi bi-arrow-left-short"></i>All holdings</a></p>
+  <section class="panel card">
+    <div class="panel-head">
+      <h2><i class="bi bi-building"></i>${esc(r.symbol)}
+        <span class="stock-name">${editable(esc(r.name || 'unnamed'),
+          { field: 'name', key: r.key, value: r.name, on: r.manual })}</span></h2>
+      <span class="hint">${r.manual_price
+        ? '<span class="chip">price set by hand</span>' : ''}${editHint()}</span>
+    </div>
+    <div class="card-body">
+      <dl class="facts">${facts.map(([k, v]) => `
+        <div><dt>${k}</dt><dd>${v}</dd></div>`).join('')}</dl>
+    </div>
+  </section>
+
+  ${renderThesis(r)}
+
+  <section class="panel card">
+    <div class="panel-head"><h2><i class="bi bi-people"></i>Who holds it</h2>
+      <span class="hint">${r.not_held_by.length
+        ? `Not held by ${r.not_held_by.map((m) => esc(m.name)).join(', ')}`
+        : 'Held by everyone'}</span></div>
+    <div class="table-responsive"><table class="table table-hover align-middle">
+      <thead><tr><th class="left">Holder</th><th>Qty</th><th>Avg cost</th>
+        <th>Invested</th><th>Value</th><th>P&amp;L</th></tr></thead>
+      <tbody>${holders}</tbody>
+    </table></div>
+  </section>
+
+  ${feedShell({
+    scope: `stock:${r.key}`,
+    title: 'Its history',
+    icon: 'bi-clock-history',
+    hint: 'Every logged event for this company, newest first',
+    seed: r.trades || [],
+    total: r.trade_count || 0,
+    empty: 'Nothing logged — the position came from a holdings statement or an '
+      + 'export, not from a trade this app read.',
+  })}`;
+}
+
+/* The thesis: markdown, rendered here and stored as a plain .md file server-side.
+ * Double-click swaps the prose for a textarea with Save and Cancel above it. */
+function renderThesis(r) {
+  const note = r.thesis;
+  const body = note
+    ? `<div class="prose">${mdToHtml(note.markdown)}</div>`
+    : `<p class="no-thesis"><i class="bi bi-pencil-square"></i>
+        ${LIVE
+        ? 'Nothing written yet. Double-click here and set out why this is held.'
+        : 'Nothing written yet.'}</p>`;
   return `
   <section class="panel card">
-    <div class="panel-head"><h2><i class="bi bi-clock-history"></i>Activity</h2>
-      <span class="hint">Every event in the log, newest first</span></div>
-    <div class="feed">${rows || '<div class="feed-row"><span class="muted">Nothing logged yet.</span></div>'}</div>
+    <div class="panel-head"><h2><i class="bi bi-journal-text"></i>My thesis</h2>
+      <span class="hint">${note
+        ? `${note.words} word${note.words === 1 ? '' : 's'} · updated ${ago(note.updated_at)}`
+        : 'markdown'}${LIVE ? ' · double-click to edit' : ''}</span></div>
+    <div class="card-body">
+      <div class="thesis" data-thesis="${esc(r.key)}">${body}</div>
+      <p class="msg" id="msg-thesis"></p>
+    </div>
   </section>`;
+}
+
+/* ------------------------------------------------------------- paginated feed
+ *
+ * Both histories — the whole family's and one company's — are the same log read
+ * two ways, so they are one component.
+ *
+ * The payload carries only the first page or two: it is re-fetched every couple
+ * of minutes, and six years of trades is half a megabyte nobody has scrolled to.
+ * Anything deeper is fetched from /api/activity a page at a time. A statically
+ * hosted copy has no server to ask, so there it simply stops at what it was
+ * given, and says so rather than implying the log ends there.
+ */
+
+const FEED_SIZE = 25;
+
+/* Which feed is on screen, and where in it we are. Survives a re-render, so the
+ * two-minute auto-reload cannot yank a reader back to page one. */
+let feed = { scope: null, offset: 0, rows: [], total: 0, truncated: false };
+
+const feedRow = (a, names) => `
+  <div class="feed-row">
+    <span class="when">${esc((a.ts || '').replace('T', ' ').slice(0, 16))}</span>
+    <span class="who">${esc(a.member_name || names[a.member] || a.member || '')}</span>
+    <span>${esc(a.text)}</span>
+    <span class="src">${esc((a.source || '').replace(/_/g, ' '))}</span>
+  </div>`;
+
+function feedBody() {
+  const names = Object.fromEntries((DATA?.members || []).map((m) => [m.id, m.name]));
+  if (!feed.rows.length) {
+    return `<div class="feed-row"><span class="muted">${feed.offset
+      ? 'Nothing on this page.' : 'Nothing logged yet.'}</span></div>`;
+  }
+  return feed.rows.map((a) => feedRow(a, names)).join('');
+}
+
+/* The counter and the buttons, re-rendered on their own after each page turn. */
+function feedNav() {
+  const from = feed.total ? feed.offset + 1 : 0;
+  const to = feed.offset + feed.rows.length;
+  const last = feed.offset + FEED_SIZE >= feed.total;
+  return `
+    <span class="feed-count">${feed.total
+      ? `${from}–${to} of ${feed.total.toLocaleString('en-IN')}`
+      : 'nothing yet'}${feed.truncated
+      ? ' <span class="chip plain" title="This is a static copy of the dashboard, so'
+        + ' only the pages it was exported with are available">exported slice</span>' : ''}</span>
+    <span class="feed-buttons">
+      <button class="mini" data-feed="first" ${feed.offset ? '' : 'disabled'}
+        title="Newest">⏮</button>
+      <button class="mini" data-feed="prev" ${feed.offset ? '' : 'disabled'}>Newer</button>
+      <button class="mini" data-feed="next" ${last ? 'disabled' : ''}>Older</button>
+    </span>`;
+}
+
+/* Seed the feed from the payload when the view changes; keep the page otherwise. */
+function feedShell({ scope, title, icon, hint, seed, total, empty }) {
+  if (feed.scope !== scope) {
+    feed = {
+      scope,
+      offset: 0,
+      rows: seed.slice(0, FEED_SIZE),
+      total: total || seed.length,
+      truncated: !LIVE && total > seed.length,
+    };
+  } else {
+    // Same view, so keep the reader where they are — but a sync since the last
+    // render may have changed how much there is to page through.
+    feed.total = total || feed.total;
+  }
+  return `
+  <section class="panel card">
+    <div class="panel-head"><h2><i class="bi ${icon}"></i>${title}</h2>
+      <span class="hint">${hint}</span></div>
+    <div class="feed" id="feed-body">${feed.rows.length ? feedBody()
+      : `<div class="feed-row"><span class="muted">${empty}</span></div>`}</div>
+    <div class="feed-nav" id="feed-nav">${feedNav()}</div>
+  </section>`;
+}
+
+/* Turn a page. Served from the payload where it reaches, from the log otherwise. */
+async function feedGo(where) {
+  const target = where === 'first' ? 0
+    : where === 'prev' ? Math.max(0, feed.offset - FEED_SIZE)
+      : feed.offset + FEED_SIZE;
+  if (target === feed.offset || target >= Math.max(1, feed.total)) return;
+
+  const isStock = feed.scope.startsWith('stock:');
+  const seed = isStock
+    ? (findStock(feed.scope.slice(6))?.trades || [])
+    : (DATA.activity || []);
+
+  const body = $('#feed-body');
+  let rows = seed.slice(target, target + FEED_SIZE);
+  if (rows.length < Math.min(FEED_SIZE, feed.total - target)) {
+    // Past what the payload carries.
+    if (!LIVE) return;
+    body.classList.add('feed-loading');
+    try {
+      const params = new URLSearchParams({ offset: target, limit: FEED_SIZE });
+      if (isStock) params.set('key', feed.scope.slice(6));
+      const res = await fetch(`/api/activity?${params}`, { cache: 'no-store' });
+      if (res.status === 401) { location.replace('/login'); return; }
+      if (!res.ok) throw new Error('could not read the log');
+      const page = await res.json();
+      rows = page.rows || [];
+      feed.total = page.total ?? feed.total;
+    } catch {
+      body.classList.remove('feed-loading');
+      body.innerHTML = '<div class="feed-row"><span class="muted">'
+        + 'Could not read that page of the log.</span></div>';
+      return;
+    }
+    body.classList.remove('feed-loading');
+  }
+
+  feed.offset = target;
+  feed.rows = rows;
+  body.innerHTML = feedBody();
+  $('#feed-nav').innerHTML = feedNav();
+  wireFeed();
+}
+
+function wireFeed() {
+  document.querySelectorAll('[data-feed]').forEach((el) =>
+    el.addEventListener('click', () => feedGo(el.dataset.feed)));
+}
+
+function renderActivity() {
+  const total = DATA.activity_total ?? (DATA.activity || []).length;
+  return feedShell({
+    scope: 'activity',
+    title: 'Activity',
+    icon: 'bi-clock-history',
+    hint: 'Every event in the log, newest first',
+    seed: DATA.activity || [],
+    total,
+    empty: 'Nothing logged yet.',
+  });
 }
 
 /* ------------------------------------------------------------------- setup */
@@ -623,6 +1044,73 @@ function renderSetup() {
       <thead><tr><th class="left">ISIN</th><th class="left">Map to</th></tr></thead>
       <tbody>${unmapped}</tbody></table></div>` : ''}
     <p class="msg" id="msg-instruments"></p>
+    </div>
+  </section>
+
+  ${renderManual()}`;
+}
+
+/* Every value currently overriding a derived one, in one list.
+ *
+ * A number typed in months ago and then forgotten is the failure mode worth
+ * designing against: it keeps overriding a price feed that has since started
+ * working, and nothing on the page says why the total looks wrong. So they are
+ * all listed here, with the cell they came from one click away. */
+function renderManual() {
+  const manual = DATA?.manual || {};
+  const rows = [];
+  (DATA?.consolidated || []).forEach((r) => {
+    (r.manual || []).forEach((field) => rows.push({
+      field, key: r.key, member: '', who: 'everyone who holds it', symbol: r.symbol,
+      shown: field === 'price' ? rupees(r.price) : esc(r.name || ''),
+    }));
+    (r.holders || []).forEach((h) => (h.manual || []).forEach((field) => rows.push({
+      field, key: r.key, member: h.member, who: esc(h.member_name), symbol: r.symbol,
+      shown: field === 'qty' ? qtyFmt.format(h.qty) : rupees(h[field], field !== 'cost'),
+    })));
+  });
+
+  const listed = rows.map((row) => `
+    <tr>
+      <td class="left"><a class="stock-link" href="#stock:${encodeURIComponent(row.key)}">
+        <span class="sym">${esc(row.symbol)}</span></a></td>
+      <td class="left">${esc((EDIT_FIELDS[row.field] || {}).label || row.field)}</td>
+      <td class="left"><span class="sub-inline">${row.who}</span></td>
+      <td>${row.shown}</td>
+      <td><button class="btn btn-sm btn-outline-danger" data-unset-field="${esc(row.field)}"
+        data-unset-key="${esc(row.key)}" data-unset-member="${esc(row.member)}">Clear</button></td>
+    </tr>`).join('');
+
+  const orphans = manual.notes_unheld || [];
+
+  return `
+  <section class="panel card">
+    <div class="panel-head"><h2><i class="bi bi-pencil-square"></i>Set by hand</h2>
+      <span class="hint">${rows.length || 'No'} value${rows.length === 1 ? '' : 's'} overriding
+        what was worked out${manual.notes ? ` · ${manual.notes} thesis note(s)` : ''}</span></div>
+    <div class="card-body">
+    <p class="help">
+      Double-clicking a value on any table stores it here, and it survives every rebuild,
+      every sync and — because it is in the encrypted backup — a host that wipes its disk.
+      Nothing else does that: a price refresh cannot overwrite one, and neither can a
+      statement. That is the point, and also the risk, so they are all listed here.
+      <b>Clear</b> puts a cell back to the value the pipeline works out.
+    </p>
+    ${rows.length ? `<div class="table-responsive"><table class="table align-middle">
+      <thead><tr><th class="left">Stock</th><th class="left">Value</th><th class="left">Applies to</th>
+        <th>Now showing</th><th></th></tr></thead>
+      <tbody>${listed}</tbody></table></div>` : ''}
+    ${manual.stored ? `<p class="form-actions m-0"><button class="btn btn-ghost" id="btn-manual-clear">
+      <i class="bi bi-eraser"></i>Clear all ${manual.stored}</button></p>` : ''}
+    ${manual.unapplied ? `<p class="help muted">
+      ${manual.unapplied} more value(s) are stored against positions nobody holds any more,
+      so they change nothing today. They are kept in case the position comes back;
+      <b>Clear all</b> removes them too.</p>` : ''}
+    ${orphans.length ? `<p class="help muted">
+      A thesis is also stored for ${orphans.length} company(ies) nobody holds any more
+      (${orphans.map(esc).join(', ')}). Those files are kept — buy the position back and
+      the note reappears on its page.</p>` : ''}
+    <p class="msg" id="msg-manual"></p>
     </div>
   </section>`;
 }
@@ -940,6 +1428,29 @@ function wireSetup() {
       return `${esc(key)} → ${esc(symbol)}`;
     })));
 
+  document.querySelectorAll('[data-unset-field]').forEach((el) =>
+    el.addEventListener('click', action('msg-manual', async (e) => {
+      const d = e.currentTarget.dataset;
+      await send('/api/override', {
+        body: { field: d.unsetField, key: d.unsetKey, member: d.unsetMember || '', value: '' },
+      });
+      const label = (EDIT_FIELDS[d.unsetField] || {}).label || d.unsetField;
+      return `${esc(label)} is back to the value we work out.`;
+    })));
+
+  const clearManual = $('#btn-manual-clear');
+  if (clearManual) {
+    clearManual.addEventListener('click', action('msg-manual', async () => {
+      if (!confirm('Clear every value you set by hand?\n\n'
+        + 'Prices, quantities, costs and names all go back to what the documents and '
+        + 'the price feed say. Thesis notes are not touched.')) {
+        throw new Error('Cancelled.');
+      }
+      const res = await send('/api/override', { method: 'DELETE' });
+      return `${res.cleared} value(s) cleared.`;
+    }));
+  }
+
   const docsForm = $('#form-docs');
   if (docsForm) {
     docsForm.addEventListener('submit', action('msg-docs', async () => {
@@ -980,8 +1491,163 @@ function wireSetup() {
   }
 }
 
+/* ------------------------------------------------------------- cell editing */
+
+let editing = null;
+
+/* True while something is being typed, so nothing reloads the page underneath it. */
+const editingNow = () => !!editing || !!$('.thesis textarea');
+
+function closeEditor() {
+  if (!editing) return;
+  const { host, pop, place } = editing;
+  editing = null;
+  host.classList.remove('editing');
+  pop.remove();
+  window.removeEventListener('scroll', place, true);
+  window.removeEventListener('resize', place);
+}
+
+/* The editor floats over the cell rather than sitting inside it: a table cell is
+ * too narrow to hold an input without shoving every column sideways, and one
+ * inside a scrolling table body gets clipped by it. */
+function openEditor(host) {
+  if (!LIVE) return;
+  closeEditor();
+  const field = host.dataset.edit;
+  const spec = EDIT_FIELDS[field];
+  if (!spec) return;
+
+  const pop = document.createElement('div');
+  pop.className = 'cell-pop card';
+  pop.innerHTML = `
+    <div class="cell-pop-bar">
+      <span class="cell-pop-label">${esc(spec.label)}</span>
+      <button type="button" class="mini" data-act="save">Save</button>
+      <button type="button" class="mini danger" data-act="cancel">Cancel</button>
+    </div>
+    <input class="form-control form-control-sm"${field === 'name' ? '' : ' inputmode="decimal"'}>
+    <span class="cell-pop-hint">${esc(spec.note)}<br>
+      Enter saves · Esc cancels · empty clears it</span>
+    <span class="cell-pop-err" hidden></span>`;
+  document.body.appendChild(pop);
+
+  const place = () => {
+    const box = host.getBoundingClientRect();
+    const width = pop.offsetWidth;
+    const height = pop.offsetHeight;
+    pop.style.left = `${Math.max(10, Math.min(window.innerWidth - width - 10, box.right - width))}px`;
+    pop.style.top = box.bottom + 6 + height < window.innerHeight
+      ? `${box.bottom + 6}px`
+      : `${Math.max(10, box.top - height - 6)}px`;
+  };
+  host.classList.add('editing');
+  editing = { host, pop, place, field };
+  place();
+  window.addEventListener('scroll', place, true);
+  window.addEventListener('resize', place);
+
+  const input = pop.querySelector('input');
+  const err = pop.querySelector('.cell-pop-err');
+  input.value = host.dataset.raw || '';
+  input.focus();
+  // Selected, not just focused: the point of opening this is usually to replace
+  // what is there, and a stray keystroke should not append to it.
+  input.select();
+
+  let saving = false;
+  const save = async () => {
+    if (saving) return;
+    saving = true;
+    pop.classList.add('saving');
+    const value = input.value;
+    try {
+      await send('/api/override', {
+        body: { field, key: host.dataset.key, member: host.dataset.member || '', value },
+      });
+      closeEditor();
+      await load();
+    } catch (exc) {
+      saving = false;
+      pop.classList.remove('saving');
+      err.hidden = false;
+      err.textContent = exc.message;
+      input.focus();
+      input.select();
+    }
+  };
+
+  pop.addEventListener('click', (e) => {
+    const act = e.target.closest('[data-act]')?.dataset.act;
+    if (act === 'save') save();
+    if (act === 'cancel') closeEditor();
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); save(); }
+    if (e.key === 'Escape') { e.preventDefault(); closeEditor(); }
+  });
+}
+
+/* The thesis editor. Same shape — Save and Cancel above the box — but in place,
+ * because a thesis needs the width of the panel. */
+function openThesis(host) {
+  if (!LIVE || host.querySelector('textarea')) return;
+  closeEditor();
+  const key = host.dataset.thesis;
+  const original = (findStock(key)?.thesis || {}).markdown || '';
+  host.innerHTML = `
+    <div class="cell-pop-bar thesis-bar">
+      <span class="cell-pop-label">Markdown</span>
+      <button type="button" class="mini" data-act="save">Save</button>
+      <button type="button" class="mini danger" data-act="cancel">Cancel</button>
+    </div>
+    <textarea class="form-control thesis-input" rows="18" spellcheck="true"
+      placeholder="## Why I own this
+
+- what the business does, in a sentence
+- what has to go right
+- what would make me sell"></textarea>`;
+
+  const box = host.querySelector('textarea');
+  box.value = original;
+  box.focus();
+  // Cursor at the end, not a full selection: prose gets added to, not replaced.
+  box.setSelectionRange(box.value.length, box.value.length);
+
+  let saving = false;
+  const save = async () => {
+    if (saving) return;
+    saving = true;
+    say('msg-thesis', 'Saving…', 'pending');
+    try {
+      await send('/api/note', { body: { key, markdown: box.value } });
+      await load();
+      say('msg-thesis', 'Saved.', 'ok');
+    } catch (exc) {
+      saving = false;
+      say('msg-thesis', esc(exc.message), 'err');
+    }
+  };
+  const cancel = () => {
+    if (box.value !== original
+        && !confirm('Discard the changes to this thesis?')) return;
+    render();
+  };
+
+  host.querySelector('[data-act=save]').addEventListener('click', save);
+  host.querySelector('[data-act=cancel]').addEventListener('click', cancel);
+  box.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); save(); }
+    if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+  });
+}
+
 function renderAttention() {
-  const items = DATA.attention || [];
+  const stock = openStock();
+  // On a company's own page, only what concerns that company.
+  const items = stock
+    ? (DATA.attention || []).filter((i) => i.symbol && i.symbol === findStock(stock)?.symbol)
+    : (DATA.attention || []);
   if (!items.length) return '';
   return `
   <div class="notice alert alert-warning">
@@ -998,6 +1664,7 @@ function renderAttention() {
 /* ------------------------------------------------------------------- wiring */
 
 function wire() {
+  closeEditor();
   document.querySelectorAll('.tab').forEach((el) =>
     el.addEventListener('click', () => go(el.dataset.tab)));
 
@@ -1005,6 +1672,24 @@ function wire() {
 
   document.querySelectorAll('[data-goto]').forEach((el) =>
     el.addEventListener('click', () => go(el.dataset.goto, { scroll: true })));
+
+  // A company name inside a clickable row opens its page; it must not also
+  // toggle the row it sits in.
+  document.querySelectorAll('.stock-link').forEach((el) =>
+    el.addEventListener('click', (e) => e.stopPropagation()));
+
+  document.querySelectorAll('.editable').forEach((el) => {
+    el.addEventListener('dblclick', (e) => { e.stopPropagation(); openEditor(el); });
+    // Reachable without a mouse, and without swallowing the row's own clicks.
+    el.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openEditor(el); }
+    });
+  });
+
+  const thesis = $('.thesis');
+  if (thesis) thesis.addEventListener('dblclick', () => openThesis(thesis));
+
+  wireFeed();
 
   document.querySelectorAll('[data-row]').forEach((el) =>
     el.addEventListener('click', () => {
@@ -1078,8 +1763,17 @@ syncBtn.addEventListener('click', (e) => {
 
 document.addEventListener('click', (e) => {
   if (!syncPop.hidden && !syncPop.contains(e.target)) closeSyncPop();
+  // Clicking away from an open cell editor abandons it, the way a spreadsheet
+  // does — except on the cell itself, whose second click is what opened it.
+  if (editing && !editing.pop.contains(e.target) && !editing.host.contains(e.target)) {
+    closeEditor();
+  }
 });
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSyncPop(); });
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  closeSyncPop();
+  closeEditor();
+});
 
 $('#form-sync').addEventListener('submit', action('msg-sync', async () => {
   const form = $('#form-sync');
@@ -1124,8 +1818,8 @@ window.addEventListener('hashchange', () => {
 
 load();
 setInterval(() => {
-  // Never auto-reload while someone is filling in a setup form, or mid-action —
-  // it would wipe what they've typed.
-  if (!LIVE || busy || active === 'setup') return;
+  // Never auto-reload while someone is filling in a setup form, editing a cell or
+  // writing a thesis, or mid-action — it would wipe what they've typed.
+  if (!LIVE || busy || active === 'setup' || editingNow()) return;
   if (document.visibilityState === 'visible') load();
 }, 120000);

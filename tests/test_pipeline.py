@@ -655,6 +655,150 @@ def incomplete_statements_do_not_erase_positions() -> None:
           f"got {held.get('FFF', {}).get('cost_known')}")
 
 
+def hand_set_values_survive_a_rebuild() -> None:
+    """Values typed into the dashboard must outrank what was derived — and stay.
+
+    They exist for the cells no document can fill: a security no price feed
+    carries, a position whose cost predates the mailbox. That makes them the one
+    kind of state the pipeline must never overwrite, and the one that has to
+    survive a rebuild, a sync and a host that wipes its disk.
+    """
+    from pm import build as buildmod
+    from pm import notes, overrides
+
+    print("\n\033[1mValues set by hand\033[0m")
+
+    cfg = cfgmod.load()
+    cfg.members.append(Member(id="kavi", name="Kavi", doc_passwords=["KAVIX0001Z"]))
+    cfg.save()
+
+    # Two positions with no NSE mapping in this throwaway root, so neither can be
+    # priced — which is exactly the situation a hand-set value is for. One of them
+    # also has no cost, the other does.
+    UNLISTED, PRIVATE = "INE900A01019", "INE900A01027"
+    ev.append([manual.set_holdings(member="kavi", rows=[
+        {"isin": UNLISTED, "symbol": "UNLISTED", "name": "Unlisted Co", "qty": 200, "avg": None},
+        {"isin": PRIVATE, "symbol": "PRIVATE", "name": "Private Co", "qty": 50, "avg": 300.0},
+    ], when=date(2026, 8, 1), source=ev.SRC_CSV)])
+
+    def row(symbol: str) -> dict:
+        payload = buildmod.build()
+        kavi = next(m for m in payload["members"] if m["id"] == "kavi")
+        found = next(h for h in kavi["holdings"] if h["symbol"] == symbol)
+        return {**found, "_payload": payload}
+
+    before = row("UNLISTED")
+    check("a position with no price feed starts unpriced and without cost",
+          before["priced"] is False and before["cost_known"] is False,
+          f"got priced={before['priced']} cost_known={before['cost_known']}")
+
+    overrides.set_value("price", UNLISTED, "125.50")
+    after = row("UNLISTED")
+    check("a hand-set price prices the position",
+          after["priced"] and after["price"] == 125.5 and after["value"] == 200 * 125.5,
+          f"got {after['price']} / {after['value']}")
+    check("and carries no day change, having no yesterday to compare against",
+          after["day_change"] is None, f"got {after['day_change']}")
+    check("the cell is marked as one that was typed in",
+          after["manual"] == ["price"] and after["manual_price"] is True, f"got {after['manual']}")
+    check("a hand-set price is never called stale",
+          after["stale"] is False and after["_payload"]["as_of"]["prices_stale"] is False)
+
+    overrides.set_value("avg", UNLISTED, "1,00.50", member="kavi")
+    after = row("UNLISTED")
+    check("a hand-set average supplies the cost the log never saw",
+          after["cost_known"] and after["avg"] == 100.5 and after["cost"] == 200 * 100.5,
+          f"got avg={after['avg']} cost={after['cost']}")
+    check("and answers the “cost was never seen” warning it existed to fix",
+          not [a for a in after["_payload"]["attention"]
+               if a["kind"] == "cost_unknown" and a["symbol"] == "UNLISTED"],
+          f"still warned: {[a for a in after['_payload']['attention'] if a['kind'] == 'cost_unknown']}")
+
+    # Invested and average are the same fact twice, so setting one must retire the
+    # other rather than leave the pair contradicting itself.
+    overrides.set_value("cost", UNLISTED, "30000", member="kavi")
+    after = row("UNLISTED")
+    check("setting invested recomputes the average and drops the average override",
+          after["cost"] == 30000 and after["avg"] == 150.0 and "avg" not in after["manual"],
+          f"got cost={after['cost']} avg={after['avg']} manual={after['manual']}")
+
+    # A corrected share count is a claim about what is held, not about what a
+    # share cost, so the average holds and the money follows it.
+    overrides.set_value("cost", UNLISTED, "", member="kavi")
+    overrides.set_value("qty", PRIVATE, "60", member="kavi")
+    after = row("PRIVATE")
+    check("a hand-set quantity keeps the average and moves the money invested",
+          after["qty"] == 60 and after["avg"] == 300.0 and after["cost"] == 60 * 300.0,
+          f"got qty={after['qty']} avg={after['avg']} cost={after['cost']}")
+
+    check("only what actually landed on a position is counted",
+          after["_payload"]["manual"]["values"] == 2
+          and after["_payload"]["manual"]["unapplied"] == 0,
+          f"got {after['_payload']['manual']}")
+
+    overrides.set_value("price", "INE000SOLD019", "99")
+    check("a value stored against a position nobody holds counts as unapplied",
+          buildmod.build()["manual"]["unapplied"] == 1,
+          f"got {buildmod.build()['manual']}")
+
+    overrides.set_value("qty", PRIVATE, "", member="kavi")
+    after = row("PRIVATE")
+    check("clearing a value goes back to what the log says",
+          after["qty"] == 50 and after["manual"] == [], f"got qty={after['qty']} {after['manual']}")
+
+    for field, value, why in (
+        ("price", "not a number", "text where a number belongs"),
+        ("price", "-5", "a negative price"),
+        ("price", "0", "a zero price"),
+        ("qty", "1e40", "an implausible quantity"),
+        ("pnl", "5", "a field that is computed, not entered"),
+    ):
+        try:
+            overrides.set_value(field, UNLISTED, value, member="kavi")
+            check(f"{why} is refused", False, "it was accepted")
+        except ValueError:
+            check(f"{why} is refused", True)
+
+    # A thesis: markdown on disk, carried in the payload so a statically hosted
+    # copy shows it too.
+    notes.write(UNLISTED, "## Why\n\nBecause of the *land bank*.\n")
+    after = row("UNLISTED")
+    stock = next(r for r in after["_payload"]["consolidated"] if r["key"] == UNLISTED)
+    check("a thesis is stored and rides along in the dashboard payload",
+          stock["thesis"] and "land bank" in stock["thesis"]["markdown"]
+          and stock["thesis"]["words"] == 7,
+          f"got {stock.get('thesis')}")
+    check("the note is a plain readable .md file, named after the instrument",
+          (paths.NOTES / f"{UNLISTED}.md").exists())
+    check("writing nothing but whitespace deletes the note",
+          notes.write(UNLISTED, "  \n ")["cleared"]
+          and not (paths.NOTES / f"{UNLISTED}.md").exists())
+
+    for key in ("../../etc/passwd", "a/b", "", "x" * 80):
+        try:
+            notes.write(key, "x")
+            check(f"a note key of {key!r} is refused", False, "it was accepted")
+        except ValueError:
+            check(f"a note key of {key!r} is refused", True)
+
+    # None of this is re-derivable, so it has to travel in the backup.
+    import io
+    import tarfile
+
+    from pm import backup
+
+    notes.write(PRIVATE, "keep me\n")
+    names = set(tarfile.open(fileobj=io.BytesIO(backup._pack())).getnames())
+    check("the backup carries the overrides and the notes",
+          "data/manual/overrides.json" in names
+          and f"data/manual/notes/{PRIVATE}.md" in names,
+          f"got {sorted(n for n in names if 'manual' in n)}")
+
+    # Leave the shared root as it was found, so later tests see the same numbers.
+    overrides.clear_all()
+    notes.write(PRIVATE, "")
+
+
 def broker_profiles_are_wired() -> None:
     """Every layout a broker declares must be one its parser actually supports.
 
@@ -813,6 +957,7 @@ def main() -> int:
     incomplete_statements_do_not_erase_positions()
     real_document_layouts()
     broker_profiles_are_wired()
+    hand_set_values_survive_a_rebuild()
 
     print(f"\n\033[1m{passed} passed, {failed} failed\033[0m  ({WORKDIR})\n")
     shutil.rmtree(WORKDIR, ignore_errors=True)

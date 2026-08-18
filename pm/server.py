@@ -30,7 +30,9 @@ from . import build as buildmod
 from . import config as cfgmod
 from . import ingest, manual, paths, prices
 from .api_admin import router as admin_router
+from .api_edit import router as edit_router
 from .events import iso, now_ist
+from .replay import replay
 from .store import read_json, write_json
 
 log = logging.getLogger(__name__)
@@ -51,6 +53,7 @@ MAX_UPLOAD = 5 * 1024 * 1024
 
 app = FastAPI(title="LameStreet", docs_url=None, redoc_url=None)
 app.include_router(admin_router)
+app.include_router(edit_router)
 
 # Mounted here rather than inside run(), so that importing `pm.server:app` yields a
 # complete app. The reloader — and any external ASGI server — imports the module in
@@ -78,6 +81,22 @@ async def require_session(request: Request, call_next):
     if request.url.path.startswith("/api/"):
         return JSONResponse({"detail": "login required"}, status_code=401)
     return RedirectResponse("/login", status_code=302)
+
+
+@app.middleware("http")
+async def revalidate_viewer(request: Request, call_next):
+    """Never let a browser run last week's viewer against this week's data.
+
+    The page and its assets keep the same filenames as the code changes under
+    them, so a cached copy is how someone ends up looking at a dashboard whose
+    JS predates the fields it is being handed — which shows up as a feature
+    simply not working, with nothing in the console to say why. `no-cache` still
+    allows the ETag round-trip, so an unchanged file is a 304 and costs nothing.
+    """
+    response = await call_next(request)
+    if request.url.path.startswith("/assets/") or request.url.path in ("/", "/login"):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return response
 
 
 class LoginIn(BaseModel):
@@ -207,7 +226,53 @@ def dashboard():
                         "holdings, or run a mail sync."},
             status_code=200,
         )
+    if payload.get("schema") != buildmod.SCHEMA:
+        # Written by an older version of this app, so it is missing fields the
+        # viewer now reads — and nothing would replace it until the next sync,
+        # which could be tomorrow. Re-derive it now: the event log is the source
+        # of truth, so this is cheap, safe to repeat, and happens exactly once.
+        log.info("dashboard.json predates schema %s — rebuilding", buildmod.SCHEMA)
+        try:
+            payload = buildmod.build()
+        except Exception as exc:
+            log.warning("could not rebuild the dashboard: %s", exc)
     return payload
+
+
+@app.get("/api/activity")
+def activity(offset: int = 0, limit: int = 25, key: str = "", member: str = ""):
+    """One page of the log, newest first — for the feeds, which are paginated.
+
+    dashboard.json carries only the first page or two. It is re-fetched every
+    couple of minutes, and half a megabyte of history nobody has scrolled to is a
+    poor trade; paging deeper comes here instead, where the whole log is.
+
+    `key` narrows it to one company (that is what a company page's history is),
+    `member` to one person.
+    """
+    limit = max(1, min(200, limit))
+    offset = max(0, offset)
+
+    rows = replay()["activity"]
+    if key:
+        rows = [a for a in rows if a.get("key") == key.strip().upper()]
+    if member:
+        rows = [a for a in rows if a.get("member") == member.strip()]
+
+    names = {m.id: m.name for m in cfgmod.load().members}
+    return {
+        "offset": offset,
+        "limit": limit,
+        "total": len(rows),
+        "rows": [{"ts": a.get("ts"),
+                  "member": a.get("member"),
+                  "member_name": names.get(a.get("member"), a.get("member")),
+                  "kind": a.get("kind"),
+                  "key": a.get("key"),
+                  "text": a.get("text"),
+                  "source": a.get("source")}
+                 for a in rows[offset:offset + limit]],
+    }
 
 
 @app.get("/api/job")

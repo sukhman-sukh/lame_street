@@ -425,6 +425,151 @@ tr.detail > td {
 }
 .not-held b { color: var(--bs-body-color); font-weight: 600; }
 
+/* -------------------------------------------------------- editable values */
+
+/* A value that can be typed over. Quiet until hovered — the tables are read far
+   more often than they are edited — and permanently marked once a hand-set value
+   is in force, because a number nobody can tell apart from a fetched one is how
+   a dashboard starts lying. */
+.editable {
+  cursor: text; border-radius: 6px; padding: 1px 5px; margin: -1px -5px;
+  transition: background .12s ease, box-shadow .12s ease;
+}
+.editable:hover {
+  background: color-mix(in srgb, var(--brand) 10%, transparent);
+  box-shadow: inset 0 -1.5px 0 color-mix(in srgb, var(--brand) 45%, transparent);
+}
+.editable:focus-visible {
+  outline: 0; background: color-mix(in srgb, var(--brand) 10%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand) 40%, transparent);
+}
+.editable.is-manual { background: color-mix(in srgb, var(--brand) 11%, transparent); }
+.editable.is-manual::after {
+  content: "\f4c9"; /* bootstrap-icons pencil-fill */
+  display: inline-block; font-family: bootstrap-icons; font-style: normal;
+  font-size: 8px; vertical-align: 3px; line-height: 1;
+  margin-left: 4px; opacity: .65; color: var(--brand);
+}
+.editable.editing {
+  background: color-mix(in srgb, var(--brand) 16%, transparent);
+  box-shadow: 0 0 0 2px var(--brand);
+}
+.sub .editable { font-size: inherit; }
+
+/* A figure that is a sum of other people's holdings: no single cell to edit. */
+.table tbody td.agg { cursor: help; }
+
+.hint-edit { display: block; color: var(--bs-tertiary-color); }
+.hint-edit .bi { margin-right: 5px; opacity: .8; }
+
+/* The floating editor. Fixed rather than in-flow: a table cell is too narrow to
+   hold an input without shoving every column sideways, and one inside a
+   scrolling table body gets clipped by it. */
+.cell-pop {
+  position: fixed; z-index: 60; width: 264px; padding: 11px 12px 12px;
+  text-align: left; border-radius: 12px;
+  box-shadow: 0 10px 34px -10px rgba(23, 20, 57, .34), var(--shadow-card);
+  animation: rise .16s ease backwards;
+}
+[data-bs-theme="dark"] .cell-pop { box-shadow: 0 12px 40px -8px rgba(0, 0, 0, .6); }
+.cell-pop.saving { opacity: .6; pointer-events: none; }
+.cell-pop-bar {
+  display: flex; align-items: center; gap: 6px; margin-bottom: 9px;
+  padding-bottom: 8px; border-bottom: 1px solid var(--bs-border-color);
+}
+.cell-pop-label {
+  flex: 1; font-size: 10.5px; font-weight: 650; text-transform: uppercase;
+  letter-spacing: .08em; color: var(--bs-tertiary-color);
+}
+.cell-pop .form-control {
+  text-align: right; font-variant-numeric: tabular-nums; font-size: 14px;
+  padding: 7px 10px;
+}
+.cell-pop-hint, .cell-pop-err {
+  display: block; margin-top: 8px; font-size: 11px; line-height: 1.45;
+  color: var(--bs-tertiary-color);
+}
+.cell-pop-err { color: var(--loss); font-size: 11.5px; }
+
+/* ---------------------------------------------------------- company page */
+
+.crumb { margin: 22px 0 -8px; font-size: 12.5px; }
+.crumb a {
+  color: var(--bs-secondary-color); text-decoration: none;
+  display: inline-flex; align-items: center; gap: 2px;
+}
+.crumb a:hover { color: var(--brand); }
+
+a.stock-link { color: inherit; text-decoration: none; }
+a.stock-link:hover .sym, a.stock-link:hover { color: var(--brand); }
+a.stock-link:hover .sym { text-decoration: underline; text-underline-offset: 3px; }
+.detail-more { margin: 12px 0 0; font-size: 12.5px; }
+.detail-more a.stock-link { color: var(--brand); font-weight: 550; }
+
+.stock-name {
+  font-weight: 400; font-size: 13px; color: var(--bs-secondary-color);
+  letter-spacing: 0;
+}
+.sub-inline { font-size: 12px; color: var(--bs-tertiary-color); }
+
+.facts {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 15px 22px; margin: 0;
+}
+.facts dt {
+  font-size: 10.5px; font-weight: 650; text-transform: uppercase;
+  letter-spacing: .08em; color: var(--bs-tertiary-color); margin-bottom: 3px;
+}
+.facts dd {
+  margin: 0; font-size: 13.5px; font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+/* ---------------------------------------------------------------- thesis */
+
+.thesis { cursor: text; border-radius: 10px; }
+.no-thesis {
+  margin: 0; padding: 22px 18px; text-align: center; font-size: 13px;
+  color: var(--bs-tertiary-color);
+  border: 1px dashed var(--bs-border-color); border-radius: 10px;
+}
+.no-thesis .bi { display: block; font-size: 19px; margin-bottom: 7px; opacity: .7; }
+.thesis-bar { margin-bottom: 10px; }
+.thesis-input { min-height: 320px; }
+
+/* Rendered markdown. Prose measure, not table measure. */
+.prose { max-width: 78ch; font-size: 13.5px; line-height: 1.65; }
+.prose > :first-child { margin-top: 0; }
+.prose > :last-child { margin-bottom: 0; }
+.prose h3, .prose h4, .prose h5, .prose h6 {
+  margin: 22px 0 8px; font-weight: 700; letter-spacing: -.01em; line-height: 1.35;
+}
+.prose h3 { font-size: 15.5px; }
+.prose h4 { font-size: 14px; }
+.prose h5, .prose h6 { font-size: 13px; color: var(--bs-secondary-color); }
+.prose p { margin: 0 0 12px; }
+.prose ul, .prose ol { margin: 0 0 12px; padding-left: 21px; }
+.prose li { margin: 4px 0; }
+.prose blockquote {
+  margin: 0 0 12px; padding: 2px 0 2px 14px;
+  border-left: 3px solid color-mix(in srgb, var(--brand) 45%, transparent);
+  color: var(--bs-secondary-color);
+}
+.prose hr { margin: 20px 0; border-color: var(--bs-border-color); opacity: 1; }
+.prose code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+  background: var(--bs-body-bg); border: 1px solid var(--bs-border-color);
+  padding: 1px 5px; border-radius: 5px;
+}
+.prose pre {
+  margin: 0 0 12px; padding: 12px 14px; overflow-x: auto;
+  background: var(--bs-body-bg); border: 1px solid var(--bs-border-color);
+  border-radius: 10px;
+}
+.prose pre code { background: none; border: 0; padding: 0; font-size: 12px; }
+.prose a { color: var(--brand); }
+.prose strong { font-weight: 650; }
+
 /* ------------------------------------------------------------------- forms */
 
 .form-control, .form-select {
@@ -620,4 +765,28 @@ textarea.form-control {
     animation-iteration-count: 1 !important;
     transition-duration: .01ms !important;
   }
+}
+
+/* ------------------------------------------------------------- feed paging */
+
+.feed-nav {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 14px; padding: 11px 19px;
+  border-top: 1px solid var(--bs-border-color);
+  background: color-mix(in srgb, var(--bs-body-bg) 45%, var(--surface));
+}
+.feed-count {
+  font-size: 12px; color: var(--bs-tertiary-color);
+  font-variant-numeric: tabular-nums;
+}
+.feed-buttons { display: flex; gap: 7px; }
+.feed-buttons .mini { min-width: 62px; }
+.feed-buttons .mini:first-child { min-width: 34px; }
+/* Dim the rows being replaced rather than emptying the panel — a feed that
+   collapses to nothing and springs back reads as a glitch. */
+.feed.feed-loading { opacity: .45; transition: opacity .12s ease; }
+
+@media (max-width: 560px) {
+  .feed-nav { flex-direction: column; align-items: stretch; gap: 9px; }
+  .feed-buttons { justify-content: space-between; }
 }

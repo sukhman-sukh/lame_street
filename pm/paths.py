@@ -19,6 +19,12 @@ RAW = DATA / "raw"                # original email bodies + attachments, kept fo
 PRICES = DATA / "prices"
 PUBLIC = DATA / "public"          # the only thing the viewer reads
 
+# Typed in by a person and derivable from nothing — deliberately not under
+# state/, which exists to be deleted and rebuilt.
+MANUAL = DATA / "manual"
+OVERRIDES = MANUAL / "overrides.json"
+NOTES = MANUAL / "notes"          # one markdown file per company
+
 HOLDINGS_CACHE = STATE / "holdings.json"
 SYNC_STATE = STATE / "sync.json"
 INSTRUMENTS = STATE / "instruments.json"
@@ -30,5 +36,5 @@ PROFILES = ROOT / "profiles"       # playwright browser sessions (bootstrap only
 
 
 def ensure_dirs() -> None:
-    for d in (DATA, EVENTS, STATE, SNAPSHOTS, RAW, PRICES, PUBLIC, PROFILES):
+    for d in (DATA, EVENTS, STATE, SNAPSHOTS, RAW, PRICES, PUBLIC, MANUAL, NOTES, PROFILES):
         d.mkdir(parents=True, exist_ok=True)

@@ -138,6 +138,9 @@ def replay(events: list[dict] | None = None) -> dict:
             last_trade[member] = ev["ts"]
             activity.append({
                 "ts": ev["ts"], "member": member, "kind": "trade",
+                # The instrument this happened to, so the feed can be sliced per
+                # company as well as read whole.
+                "key": key, "symbol": pos["symbol"],
                 "text": f"{ev.get('side','').upper()} {qty:g} {pos['symbol']} @ {price:,.2f}",
                 "source": ev.get("source"),
             })
@@ -294,6 +297,7 @@ def replay(events: list[dict] | None = None) -> dict:
             pos["last_event"] = ev["ts"]
             activity.append({
                 "ts": ev["ts"], "member": member, "kind": "adjustment",
+                "key": key, "symbol": pos["symbol"],
                 "text": f"{pos['symbol']} {delta:+g} — {ev.get('reason','')}",
                 "source": ev.get("source"),
             })
@@ -302,10 +306,14 @@ def replay(events: list[dict] | None = None) -> dict:
     holdings: dict[str, list[dict]] = {}
     for member, book in books.items():
         live = []
-        for pos in book.values():
+        for key, pos in book.items():
             if pos["qty"] <= EPS:
                 continue
             pos = dict(pos)
+            # The book's own key, carried out so callers address a position the
+            # same way the log does — anything derived from the symbol alone
+            # drifts the moment a company is renamed.
+            pos["key"] = key
             pos["avg"] = _avg(pos)
             live.append(pos)
             if not pos["cost_known"]:

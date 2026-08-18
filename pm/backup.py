@@ -6,7 +6,8 @@ the dashboard is derived — but four things exist nowhere else: config.json,
 the event log (which carries the one-time holdings imports and their cost
 basis), the manual ISIN mappings in data/state, and any document handed to
 the app by hand rather than found in a mailbox. Together they are a few
-megabytes.
+megabytes. So does everything typed straight into the dashboard — a price no
+feed carries, a cost no statement states, the thesis behind a holding.
 
 So: tar those, encrypt them, and PUT the single blob into a private GitHub
 repo via the contents API after every successful sync. On boot, a server that
@@ -29,6 +30,7 @@ import io
 import logging
 import os
 import tarfile
+import threading
 import time
 
 import requests
@@ -45,8 +47,16 @@ _SALT_LEN = 16
 
 # What must survive; everything else re-derives from Gmail/NSE/Yahoo. Prices
 # are re-fetchable but weigh a few KB, and carrying them means a restored host
-# can render a complete dashboard before its first price refresh.
-_INCLUDE = ("config.json", "data/events", "data/snapshots", "data/state", "data/prices")
+# can render a complete dashboard before its first price refresh. data/manual is
+# the one directory in here that no amount of re-fetching could reproduce: it is
+# what a person typed, and it exists nowhere but this disk.
+_INCLUDE = ("config.json", "data/events", "data/snapshots", "data/state",
+            "data/prices", "data/manual")
+
+# Waiting for the next sync would leave a typed-in value durable nowhere for
+# hours, but a push per keystroke-sized edit is a lot of traffic. So a change
+# schedules a push a few seconds out and any further edits ride along with it.
+DEBOUNCE_SECONDS = 8.0
 
 # data/raw is left out because it is re-fetchable — it is a cache of Gmail, and
 # ninety megabytes of it. That holds for everything the sync downloaded, and for
@@ -174,6 +184,42 @@ def save() -> str:
                        headers=_headers(token), timeout=120)
     res.raise_for_status()
     return f"backed up {len(blob) / 1e6:.1f} MB to {repo}"
+
+
+_push_lock = threading.Lock()
+_push_again = threading.Event()
+
+
+def push_soon(reason: str = "an edit", delay: float = DEBOUNCE_SECONDS) -> bool:
+    """Schedule a background push. Returns whether one was scheduled.
+
+    Best-effort by design: it runs off the request thread, and a failure is
+    logged rather than raised — a GitHub outage must not make the dashboard
+    refuse an edit. The value is already on local disk either way.
+    """
+    if not enabled():
+        return False
+    if not _push_lock.acquire(blocking=False):
+        # One is already waiting out its delay; let it carry this change too.
+        _push_again.set()
+        return True
+
+    def worker():
+        try:
+            while True:
+                _push_again.clear()
+                time.sleep(delay)
+                try:
+                    log.info("backup after %s — %s", reason, save())
+                except Exception as exc:
+                    log.warning("backup after %s failed: %s", reason, exc)
+                if not _push_again.is_set():
+                    return
+        finally:
+            _push_lock.release()
+
+    threading.Thread(target=worker, daemon=True, name="pm-backup").start()
+    return True
 
 
 def restore() -> bool:
